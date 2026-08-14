@@ -1,0 +1,25 @@
+{
+  "name": "AI个人管家",
+  "appid": "__UNI__AI_BUTLER",
+  "description": "AI个人管家客户端",
+  "versionName": "0.1.0",
+  "versionCode": "100",
+  "transformPx": false,
+  "uniStatistics": {
+    "enable": false
+  },
+  "h5": {
+    "router": {
+      "mode": "history"
+    }
+  },
+  "mp-weixin": {
+    "appid": "touristappid",
+    "setting": {
+      "urlCheck": false,
+      "es6": true,
+      "minified": true
+    },
+    "usingComponents": true
+  }
+}

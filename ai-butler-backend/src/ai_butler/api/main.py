@@ -1,0 +1,17 @@
+import uvicorn
+
+from ai_butler.config import get_settings
+
+
+def run() -> None:
+    settings = get_settings()
+    uvicorn.run(
+        "ai_butler.api.app:app",
+        host=settings.app_host,
+        port=settings.app_port,
+        reload=settings.app_env == "development",
+    )
+
+
+if __name__ == "__main__":
+    run()

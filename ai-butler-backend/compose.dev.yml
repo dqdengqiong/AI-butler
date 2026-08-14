@@ -1,0 +1,104 @@
+name: ai-butler-dev
+
+services:
+  postgres:
+    image: pgvector/pgvector:0.8.1-pg17-bookworm
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./infra/postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    restart: unless-stopped
+
+  qdrant:
+    image: qdrant/qdrant:v1.15.4
+    ports:
+      - "127.0.0.1:6333:6333"
+      - "127.0.0.1:6334:6334"
+    volumes:
+      - qdrant-data:/qdrant/storage
+    restart: unless-stopped
+
+  api:
+    build:
+      context: .
+    command: ["butler-api"]
+    environment: &app-environment
+      APP_ENV: development
+      APP_HOST: 0.0.0.0
+      APP_PORT: 8000
+      APP_CORS_ORIGINS: '["http://127.0.0.1:5173"]'
+      APP_DATABASE_URL: postgresql+psycopg://butler_app:butler_app@postgres:5432/butler_dev
+      MIGRATION_DATABASE_URL: postgresql+psycopg://butler_migrator:butler_migrator@postgres:5432/butler_dev
+      LANGGRAPH_DATABASE_URL: postgresql://butler_app:butler_app@postgres:5432/butler_langgraph_dev
+      LANGGRAPH_MIGRATION_DATABASE_URL: postgresql://butler_migrator:butler_migrator@postgres:5432/butler_langgraph_dev
+      QDRANT_URL: http://qdrant:6333
+      QDRANT_COLLECTION: ai_butler_knowledge
+      SEARCH_PROVIDER: ${SEARCH_PROVIDER:-fake}
+      TAVILY_API_KEY: ${TAVILY_API_KEY:-}
+      TAVILY_BASE_URL: ${TAVILY_BASE_URL:-https://api.tavily.com}
+      SEARCH_TIMEOUT_SECONDS: ${SEARCH_TIMEOUT_SECONDS:-15}
+      SEARCH_MAX_QUERIES: ${SEARCH_MAX_QUERIES:-3}
+      SEARCH_MAX_RESULTS: ${SEARCH_MAX_RESULTS:-5}
+      OFFICIAL_SOURCE_DOMAINS: '${OFFICIAL_SOURCE_DOMAINS:-[]}'
+      EMBEDDING_DIMENSIONS: 8
+      OBJECT_STORAGE_LOCAL_PATH: /app/local-storage
+      PUBLIC_BASE_URL: http://127.0.0.1:8000
+      AUTH_ACCESS_TOKEN_SECRET: local-compose-access-secret-change-before-sharing # pragma: allowlist secret
+      AUTH_REFRESH_TOKEN_SECRET: local-compose-refresh-secret-change-before-sharing # pragma: allowlist secret
+      STREAM_TICKET_SECRET: local-compose-ticket-secret-change-before-sharing # pragma: allowlist secret
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - local-storage:/app/local-storage
+    depends_on:
+      postgres:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+    restart: unless-stopped
+
+  agent-worker:
+    build:
+      context: .
+    command: ["butler-agent-worker"]
+    environment: *app-environment
+    volumes:
+      - local-storage:/app/local-storage
+    depends_on:
+      postgres:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+    restart: unless-stopped
+
+  scheduler-worker:
+    build:
+      context: .
+    command: ["butler-scheduler-worker"]
+    environment: *app-environment
+    volumes:
+      - local-storage:/app/local-storage
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  clamav:
+    image: clamav/clamav:1.4.3
+    profiles: ["malware-scan"]
+    restart: unless-stopped
+
+volumes:
+  postgres-data:
+  qdrant-data:
+  local-storage:

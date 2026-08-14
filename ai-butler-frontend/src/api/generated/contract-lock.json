@@ -1,0 +1,6 @@
+{
+  "apiTag": "api-v1.0.0",
+  "backendCommit": "509422a3b752e0f49853eeabb37c0348b1cf368a",
+  "generator": "openapi-typescript@7.13.0",
+  "schemaSha256": "e4952a75c991b1b42a93aaaa2d17dd6fc17328aa376e07711918c6b288beaa45"
+}

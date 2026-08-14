@@ -1,0 +1,101 @@
+[project]
+name = "ai-butler-backend"
+version = "0.1.0"
+description = "AI Butler modular FastAPI backend and workers"
+readme = "README.md"
+requires-python = ">=3.13,<3.14"
+dependencies = [
+  "alembic>=1.16,<2",
+  "fastapi>=0.116,<1",
+  "httpx>=0.28,<1",
+  "langgraph>=0.6,<2",
+  "langgraph-checkpoint-postgres>=2,<4",
+  "openai>=2.0,<3",
+  "pypdf>=6.1,<7",
+  "psycopg[binary,pool]>=3.2,<4",
+  "pydantic-settings>=2.10,<3",
+  "sqlalchemy[asyncio]>=2.0,<3",
+  "uvicorn[standard]>=0.35,<1",
+]
+
+[dependency-groups]
+dev = [
+  "coverage[toml]>=7.10,<8",
+  "deepeval>=4,<5",
+  "detect-secrets>=1.5,<2",
+  "httpx>=0.28,<1",
+  "mypy>=1.17,<2",
+  "pytest>=8.4,<9",
+  "pytest-asyncio>=1.1,<2",
+  "pytest-cov>=6.2,<7",
+  "ruff>=0.12,<1",
+  "types-requests>=2.32,<3",
+]
+
+[project.scripts]
+butler-api = "ai_butler.api.main:run"
+butler-agent-worker = "ai_butler.workers.agent:main"
+butler-scheduler-worker = "ai_butler.workers.scheduler:main"
+butler-seed = "ai_butler.scripts.seed:main"
+butler-eval-live = "ai_butler.scripts.run_agent_evals:main"
+
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ai_butler"]
+
+[tool.fastapi]
+entrypoint = "ai_butler.api.app:app"
+
+[tool.ruff]
+target-version = "py313"
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "ASYNC", "S", "RUF"]
+# RUF001/RUF002 会把简体中文标点误判为易混淆字符；项目注释与安全文案要求使用中文。
+ignore = ["S101", "RUF001", "RUF002", "RUF003"]
+
+[tool.ruff.lint.per-file-ignores]
+"migrations/versions/*.py" = ["E501"]
+"src/ai_butler/application/butler.py" = ["E501"]
+"src/ai_butler/api/routers/*.py" = ["B008"]
+"src/ai_butler/config.py" = ["S105"]
+"src/ai_butler/api/schemas.py" = ["S105"]
+"tests/**/*.py" = ["S105", "S106"]
+
+[tool.mypy]
+python_version = "3.13"
+strict = true
+mypy_path = "src"
+packages = ["ai_butler"]
+
+[tool.pytest.ini_options]
+addopts = "-p no:rerunfailures --strict-config --strict-markers --cov=ai_butler --cov-report=term-missing --cov-fail-under=80"
+asyncio_mode = "auto"
+testpaths = ["tests"]
+markers = [
+  "integration: PostgreSQL/Qdrant integration and recovery tests",
+  "eval_smoke: fast synthetic DeepEval contract gate",
+  "eval_core: complete deterministic Agent contract suite",
+  "eval_live: explicitly paid real-model Agent trials",
+  "eval_security: prompt injection, authorization, and isolation suite",
+]
+
+[tool.coverage.run]
+branch = true
+source = ["ai_butler"]
+omit = [
+  "src/ai_butler/api/main.py",
+  "src/ai_butler/scripts/*",
+  "src/ai_butler/workers/agent.py",
+  "src/ai_butler/workers/scheduler.py",
+]
+
+[tool.coverage.report]
+fail_under = 80
+show_missing = true
+skip_covered = true
