@@ -10,6 +10,7 @@ import asyncio
 import base64
 import binascii
 import hashlib
+import hmac
 import json
 import re
 from datetime import UTC, date, datetime, timedelta
@@ -21,6 +22,14 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from ai_butler.adapters.auth import AuthIdentity
+from ai_butler.adapters.conversation_router import (
+    ConversationRoute,
+    ConversationRouteDecision,
+    ConversationRouter,
+    ConversationRouteRequest,
+    FakeConversationRouter,
+    LLMConversationRouter,
+)
 from ai_butler.adapters.documents import SUPPORTED_RAG_MIME_TYPES, chunk_text, extract_text
 from ai_butler.adapters.embedding import (
     EmbeddingProvider,
@@ -38,6 +47,7 @@ from ai_butler.adapters.search import (
     TavilySearchProvider,
     minimize_public_query,
 )
+from ai_butler.adapters.sms import MockSmsProvider, SmsProvider
 from ai_butler.adapters.vector import QdrantVectorStore, VectorPoint, VectorStore, VectorStoreError
 from ai_butler.agent.availability import (
     AvailabilityInterpretationV1,
@@ -50,7 +60,8 @@ from ai_butler.api.schemas import (
     ApprovalDecisionRequest,
     AvailabilityRequest,
     CompleteUploadRequest,
-    CreateConversationRequest,
+    PhoneLoginRequest,
+    PhoneVerificationCodeRequest,
     PreferencesRequest,
     ProfileRequest,
     SendMessageRequest,
@@ -61,6 +72,7 @@ from ai_butler.api.schemas import (
 from ai_butler.config import Settings
 from ai_butler.domain.errors import ButlerError, conflict, not_found
 from ai_butler.infrastructure.database import AsyncDatabase
+from ai_butler.phone import PhoneCipher, normalize_mainland_phone, phone_lookup_hash
 from ai_butler.security import (
     issue_access_token,
     issue_refresh_token,
@@ -89,6 +101,8 @@ PRIVATE_SEARCH_PATTERN = re.compile(r"我的资料|附件|文件|文档")
 NON_TERMINAL_RUN_SQL = (
     "'QUEUED','RUNNING','AWAITING_INPUT','AWAITING_APPROVAL','FAILED_RETRYABLE','CANCEL_REQUESTED'"
 )
+EXECUTING_RUN_SQL = "'QUEUED','RUNNING','CANCEL_REQUESTED'"
+SUSPENDED_RUN_SQL = "'AWAITING_INPUT','AWAITING_APPROVAL','FAILED_RETRYABLE'"
 
 
 def _json(value: object) -> str:
@@ -147,6 +161,8 @@ class ButlerService:
         embedding_provider: EmbeddingProvider | None = None,
         vector_store: VectorStore | None = None,
         llm: LLM | None = None,
+        sms_provider: SmsProvider | None = None,
+        conversation_router: ConversationRouter | None = None,
     ) -> None:
         self.database = database
         self.settings = settings
@@ -157,89 +173,353 @@ class ButlerService:
             settings.qdrant_collection,
             settings.embedding_dimensions,
         )
-        self.availability_interpreter = AvailabilityInterpreter(llm or self._build_llm(settings))
+        resolved_llm = llm or self._build_llm(settings)
+        self.availability_interpreter = AvailabilityInterpreter(resolved_llm)
+        self.conversation_router = conversation_router or (
+            FakeConversationRouter()
+            if settings.llm_provider == "fake"
+            else LLMConversationRouter(resolved_llm)
+        )
         self.evidence_gate = EvidenceGate(tuple(settings.official_source_domains))
+        if sms_provider is None and settings.sms_provider != "mock":
+            raise ValueError("unsupported sms provider")
+        self.sms_provider = sms_provider or MockSmsProvider()
+        self.phone_cipher = PhoneCipher(settings.phone_encryption_secret)
 
-    async def login(
+    def auth_config(self) -> dict[str, object]:
+        """返回不含供应商和密钥信息的公开登录能力配置。"""
+
+        return {
+            "sms_verification_enabled": self.settings.sms_verification_enabled,
+            "sms_code_length": self.settings.sms_code_length,
+            "sms_code_ttl_seconds": self.settings.sms_code_ttl_seconds,
+            "sms_resend_seconds": self.settings.sms_resend_seconds,
+        }
+
+    async def send_phone_verification_code(
         self,
-        identity: AuthIdentity,
-        device_id: str,
+        request: PhoneVerificationCodeRequest,
+        idempotency_key: str,
     ) -> dict[str, object]:
-        """幂等登录并初始化唯一 BUTLER 主聊天。"""
+        """创建验证码挑战并在事务外调用短信供应商。
 
+        PENDING 挑战也计入限流，避免供应商慢请求期间并发绕过。供应商失败后
+        挑战转为 FAILED，绝不会被登录流程接受。
+        """
+
+        if not self.settings.sms_verification_enabled:
+            raise ButlerError("SMS_VERIFICATION_DISABLED", "短信验证码功能未开启", 409)
+        phone = normalize_mainland_phone(request.phone)
+        phone_hash = phone_lookup_hash(phone, self.settings.phone_lookup_secret)
+        request_key_hash = token_hmac(idempotency_key, self.settings.sms_code_secret)
         now = datetime.now(UTC)
+        challenge_id = uuid4()
+        code = self.settings.sms_mock_code
+        if len(code) != self.settings.sms_code_length or not code.isdigit():
+            raise RuntimeError("invalid mock sms code configuration")
+        code_hash = token_hmac(f"{challenge_id}:{code}", self.settings.sms_code_secret)
+
         async with self.database.transaction() as connection:
-            await self._ensure_agent_definitions(connection)
-            existing = _row(
+            duplicate = _row(
                 await connection.execute(
                     text(
-                        "SELECT u.* FROM users u JOIN user_identities i ON i.user_id=u.id "
-                        "WHERE i.provider=:provider AND i.provider_subject=:subject FOR UPDATE"
+                        "SELECT id,phone_hash,device_id,status,expires_at FROM "
+                        "phone_verification_challenges WHERE request_key_hash=:request_key_hash"
+                    ),
+                    {"request_key_hash": request_key_hash},
+                )
+            )
+            if duplicate:
+                if (
+                    duplicate["phone_hash"] != phone_hash
+                    or duplicate["device_id"] != request.device_id
+                ):
+                    raise conflict("IDEMPOTENCY_KEY_REUSED", "幂等键已用于其他验证码请求")
+                return {
+                    "challenge_id": duplicate["id"],
+                    "expires_in": max(0, int((duplicate["expires_at"] - now).total_seconds())),
+                    "resend_after": self.settings.sms_resend_seconds,
+                }
+            recent = _row(
+                await connection.execute(
+                    text(
+                        "SELECT "
+                        "COUNT(*) FILTER (WHERE phone_hash=:phone_hash) AS phone_count,"
+                        "COUNT(*) FILTER (WHERE device_id=:device_id) AS device_count,"
+                        "MAX(created_at) FILTER (WHERE phone_hash=:phone_hash) AS last_phone_send "
+                        "FROM phone_verification_challenges WHERE created_at>=:hour_ago"
+                    ),
+                    {
+                        "phone_hash": phone_hash,
+                        "device_id": request.device_id,
+                        "hour_ago": now - timedelta(hours=1),
+                    },
+                )
+            )
+            if recent and (
+                int(recent["phone_count"] or 0) >= self.settings.sms_phone_hourly_limit
+                or int(recent["device_count"] or 0) >= self.settings.sms_device_hourly_limit
+            ):
+                raise ButlerError("SMS_RATE_LIMITED", "验证码请求过于频繁，请稍后再试", 429, True)
+            if recent and recent.get("last_phone_send") is not None:
+                elapsed = (now - recent["last_phone_send"]).total_seconds()
+                if elapsed < self.settings.sms_resend_seconds:
+                    raise ButlerError(
+                        "SMS_RATE_LIMITED",
+                        "验证码请求过于频繁，请稍后再试",
+                        429,
+                        True,
+                        {"retry_after": int(self.settings.sms_resend_seconds - elapsed) + 1},
+                    )
+            await connection.execute(
+                text(
+                    "INSERT INTO phone_verification_challenges("
+                    "id,phone_hash,code_hash,device_id,request_key_hash,status,expires_at) "
+                    "VALUES(:id,:phone_hash,:code_hash,:device_id,:request_key_hash,'PENDING',:expires_at)"
+                ),
+                {
+                    "id": challenge_id,
+                    "phone_hash": phone_hash,
+                    "code_hash": code_hash,
+                    "device_id": request.device_id,
+                    "request_key_hash": request_key_hash,
+                    "expires_at": now + timedelta(seconds=self.settings.sms_code_ttl_seconds),
+                },
+            )
+
+        try:
+            provider_message_id = await self.sms_provider.send_login_code(phone, code, challenge_id)
+        except Exception as exc:
+            async with self.database.transaction() as connection:
+                await connection.execute(
+                    text(
+                        "UPDATE phone_verification_challenges SET status='FAILED' "
+                        "WHERE id=:id AND status='PENDING'"
+                    ),
+                    {"id": challenge_id},
+                )
+            raise ButlerError("SMS_SEND_FAILED", "验证码发送失败，请稍后重试", 503, True) from exc
+        async with self.database.transaction() as connection:
+            await connection.execute(
+                text(
+                    "UPDATE phone_verification_challenges SET status='SENT',sent_at=:now,"
+                    "provider_message_id=:provider_message_id WHERE id=:id AND status='PENDING'"
+                ),
+                {
+                    "id": challenge_id,
+                    "now": now,
+                    "provider_message_id": provider_message_id,
+                },
+            )
+        return {
+            "challenge_id": challenge_id,
+            "expires_in": self.settings.sms_code_ttl_seconds,
+            "resend_after": self.settings.sms_resend_seconds,
+        }
+
+    async def phone_login(self, request: PhoneLoginRequest) -> dict[str, object]:
+        """按手机号唯一账号键登录，并在开启时原子消费验证码。"""
+
+        phone = normalize_mainland_phone(request.phone)
+        now = datetime.now(UTC)
+        verification_error: ButlerError | None = None
+        async with self.database.transaction() as connection:
+            if self.settings.sms_verification_enabled:
+                verification_error = await self._consume_phone_challenge(
+                    connection, request, phone, now
+                )
+            if verification_error is None:
+                return await self._login_by_phone(connection, phone, request.device_id, now)
+        # 错误尝试和过期状态必须先提交，不能因抛出领域错误而随事务回滚。
+        raise verification_error
+
+    async def wechat_login(
+        self,
+        identity: AuthIdentity,
+        phone_value: str,
+        device_id: str,
+    ) -> dict[str, object]:
+        """按微信已授权手机号登录，并把微信稳定主体绑定到同一账号。"""
+
+        phone = normalize_mainland_phone(phone_value)
+        now = datetime.now(UTC)
+        async with self.database.transaction() as connection:
+            return await self._login_by_phone(connection, phone, device_id, now, identity)
+
+    async def _login_by_phone(
+        self,
+        connection: AsyncConnection,
+        phone: str,
+        device_id: str,
+        now: datetime,
+        identity: AuthIdentity | None = None,
+    ) -> dict[str, object]:
+        """在一个短事务中解析手机号账号、绑定身份并签发刷新会话。"""
+
+        await self._ensure_agent_definitions(connection)
+        phone_hash = phone_lookup_hash(phone, self.settings.phone_lookup_secret)
+        # 空结果无法通过 FOR UPDATE 锁定；事务级 advisory lock 保证同一手机号
+        # 的并发首次登录串行，唯一索引则作为最终数据库防线。
+        await connection.execute(
+            text("SELECT pg_advisory_xact_lock(hashtextextended(:phone_hash,0))"),
+            {"phone_hash": phone_hash},
+        )
+        existing = _row(
+            await connection.execute(
+                text("SELECT * FROM users WHERE phone_hash=:phone_hash FOR UPDATE"),
+                {"phone_hash": phone_hash},
+            )
+        )
+        identity_row = None
+        if identity is not None:
+            identity_row = _row(
+                await connection.execute(
+                    text(
+                        "SELECT i.*,u.phone_hash,u.status FROM user_identities i "
+                        "JOIN users u ON u.id=i.user_id WHERE i.provider=:provider "
+                        "AND i.provider_subject=:subject FOR UPDATE"
                     ),
                     {"provider": identity.provider, "subject": identity.subject},
                 )
             )
-            is_new = existing is None
-            user_id = identity.user_id if existing is None else UUID(str(existing["id"]))
-            if existing is None:
+            if identity_row and identity_row["phone_hash"] != phone_hash:
+                raise conflict("PHONE_IDENTITY_CONFLICT", "微信身份已绑定其他手机号")
+
+        is_new = existing is None and identity_row is None
+        if identity_row is not None:
+            user_id = UUID(str(identity_row["user_id"]))
+            existing = identity_row
+        elif existing is not None:
+            user_id = UUID(str(existing["id"]))
+        else:
+            user_id = uuid4()
+            await connection.execute(
+                text(
+                    "INSERT INTO users(id,status,nickname,phone_ciphertext,phone_hash,locale,timezone) "
+                    "VALUES(:id,'ACTIVE','用户',:phone_ciphertext,:phone_hash,'zh-CN','Asia/Shanghai')"
+                ),
+                {
+                    "id": user_id,
+                    "phone_ciphertext": self.phone_cipher.encrypt(phone),
+                    "phone_hash": phone_hash,
+                },
+            )
+            await connection.execute(
+                text("INSERT INTO user_profiles(user_id) VALUES(:user_id)"),
+                {"user_id": user_id},
+            )
+            await connection.execute(
+                text("INSERT INTO memory_policy_state(user_id) VALUES(:user_id)"),
+                {"user_id": user_id},
+            )
+
+        if existing is not None and existing["status"] != "ACTIVE":
+            raise ButlerError("ACCOUNT_UNAVAILABLE", "账号当前不可登录", 403)
+        if identity is not None:
+            if identity_row is None:
                 await connection.execute(
                     text(
-                        "INSERT INTO users(id,status,nickname,locale,timezone) "
-                        "VALUES(:id,'ACTIVE','微信用户','zh-CN','Asia/Shanghai')"
-                    ),
-                    {"id": user_id},
-                )
-                await connection.execute(
-                    text(
-                        "INSERT INTO user_identities(id,user_id,provider,provider_subject,last_login_at) "
-                        "VALUES(:id,:user_id,:provider,:subject,:now)"
+                        "INSERT INTO user_identities("
+                        "id,user_id,provider,provider_subject,union_subject,last_login_at) "
+                        "VALUES(:id,:user_id,:provider,:subject,:union_subject,:now)"
                     ),
                     {
                         "id": uuid4(),
                         "user_id": user_id,
                         "provider": identity.provider,
                         "subject": identity.subject,
+                        "union_subject": identity.union_subject,
                         "now": now,
                     },
                 )
-                await connection.execute(
-                    text("INSERT INTO user_profiles(user_id) VALUES(:user_id)"),
-                    {"user_id": user_id},
-                )
-                await connection.execute(
-                    text("INSERT INTO memory_policy_state(user_id) VALUES(:user_id)"),
-                    {"user_id": user_id},
-                )
             else:
-                if existing["status"] != "ACTIVE":
-                    raise ButlerError("ACCOUNT_UNAVAILABLE", "账号当前不可登录", 403)
                 await connection.execute(
                     text(
-                        "UPDATE user_identities SET last_login_at=:now "
+                        "UPDATE user_identities SET last_login_at=:now,"
+                        "union_subject=COALESCE(:union_subject,union_subject) "
                         "WHERE provider=:provider AND provider_subject=:subject"
                     ),
-                    {"now": now, "provider": identity.provider, "subject": identity.subject},
+                    {
+                        "now": now,
+                        "union_subject": identity.union_subject,
+                        "provider": identity.provider,
+                        "subject": identity.subject,
+                    },
                 )
-            await self._ensure_user_workspace(connection, user_id)
-            session_id = uuid4()
-            refresh_token = issue_refresh_token(session_id)
+        await self._ensure_user_workspace(connection, user_id)
+        session_id = uuid4()
+        refresh_token = issue_refresh_token(session_id)
+        await connection.execute(
+            text(
+                "INSERT INTO auth_sessions(id,user_id,refresh_token_hash,device_id,status,expires_at) "
+                "VALUES(:id,:user_id,:token_hash,:device_id,'ACTIVE',:expires_at)"
+            ),
+            {
+                "id": session_id,
+                "user_id": user_id,
+                "token_hash": token_hmac(refresh_token, self.settings.auth_refresh_token_secret),
+                "device_id": device_id,
+                "expires_at": now + timedelta(seconds=self.settings.auth_refresh_token_seconds),
+            },
+        )
+        user = await self._get_user(connection, user_id)
+        return self._token_response(user, session_id, refresh_token, is_new)
+
+    async def _consume_phone_challenge(
+        self,
+        connection: AsyncConnection,
+        request: PhoneLoginRequest,
+        phone: str,
+        now: datetime,
+    ) -> ButlerError | None:
+        """锁定并一次性消费挑战，避免并发重放产生多个会话。"""
+
+        if request.verification_challenge_id is None or request.verification_code is None:
+            return ButlerError("SMS_CODE_REQUIRED", "请输入短信验证码", 422)
+        phone_hash = phone_lookup_hash(phone, self.settings.phone_lookup_secret)
+        challenge = _row(
             await connection.execute(
                 text(
-                    "INSERT INTO auth_sessions(id,user_id,refresh_token_hash,device_id,status,expires_at) "
-                    "VALUES(:id,:user_id,:token_hash,:device_id,'ACTIVE',:expires_at)"
+                    "SELECT * FROM phone_verification_challenges WHERE id=:id "
+                    "AND phone_hash=:phone_hash AND device_id=:device_id FOR UPDATE"
                 ),
                 {
-                    "id": session_id,
-                    "user_id": user_id,
-                    "token_hash": token_hmac(
-                        refresh_token, self.settings.auth_refresh_token_secret
-                    ),
-                    "device_id": device_id,
-                    "expires_at": now + timedelta(seconds=self.settings.auth_refresh_token_seconds),
+                    "id": request.verification_challenge_id,
+                    "phone_hash": phone_hash,
+                    "device_id": request.device_id,
                 },
             )
-            user = await self._get_user(connection, user_id)
-        return self._token_response(user, session_id, refresh_token, is_new)
+        )
+        if challenge is None or challenge["status"] != "SENT":
+            return ButlerError("SMS_CODE_INVALID", "验证码无效或已使用", 401)
+        if challenge["expires_at"] <= now:
+            await connection.execute(
+                text("UPDATE phone_verification_challenges SET status='EXPIRED' WHERE id=:id"),
+                {"id": challenge["id"]},
+            )
+            return ButlerError("SMS_CODE_EXPIRED", "验证码已过期，请重新获取", 401)
+        supplied_hash = token_hmac(
+            f"{challenge['id']}:{request.verification_code}", self.settings.sms_code_secret
+        )
+        if not hmac.compare_digest(str(challenge["code_hash"]), supplied_hash):
+            attempts = int(challenge["attempt_count"]) + 1
+            status_value = "LOCKED" if attempts >= self.settings.sms_max_attempts else "SENT"
+            await connection.execute(
+                text(
+                    "UPDATE phone_verification_challenges SET attempt_count=:attempts,status=:status "
+                    "WHERE id=:id"
+                ),
+                {"attempts": attempts, "status": status_value, "id": challenge["id"]},
+            )
+            return ButlerError("SMS_CODE_INVALID", "验证码无效或已使用", 401)
+        await connection.execute(
+            text(
+                "UPDATE phone_verification_challenges SET status='CONSUMED',consumed_at=:now "
+                "WHERE id=:id"
+            ),
+            {"id": challenge["id"], "now": now},
+        )
+        return None
 
     async def refresh(self, refresh_token: str, device_id: str) -> dict[str, object]:
         """原子轮换刷新令牌；旧令牌复用会撤销当前会话。"""
@@ -466,8 +746,8 @@ class ButlerService:
         async with self.database.transaction() as connection:
             await connection.execute(
                 text(
-                    "UPDATE users SET status='DELETING',updated_at=:now WHERE id=:user_id "
-                    "AND status='ACTIVE'"
+                    "UPDATE users SET status='DELETING',phone_ciphertext=NULL,updated_at=:now "
+                    "WHERE id=:user_id AND status='ACTIVE'"
                 ),
                 {"user_id": user_id, "now": now},
             )
@@ -523,7 +803,7 @@ class ButlerService:
     async def list_conversations(
         self, user_id: UUID, limit: int = 30, cursor: str | None = None
     ) -> dict[str, object]:
-        """按当前优先、最近活动倒序列出用户可见会话。"""
+        """按当前优先、最近活动倒序列出用户可见的非空历史会话。"""
 
         parameters: dict[str, object] = {"user_id": user_id, "limit": limit + 1}
         cursor_clause = ""
@@ -562,7 +842,10 @@ class ButlerService:
                             "LEFT JOIN LATERAL (SELECT content,created_at FROM messages "
                             "WHERE conversation_id=c.id AND role IN ('USER','ASSISTANT') "
                             "ORDER BY created_at DESC,id DESC LIMIT 1) lm ON true "
-                            f"WHERE c.user_id=:user_id {cursor_clause}"
+                            "WHERE c.user_id=:user_id AND c.deleted_at IS NULL "
+                            "AND EXISTS (SELECT 1 FROM messages um "
+                            "WHERE um.conversation_id=c.id AND um.role='USER') "
+                            f"{cursor_clause}"
                             "ORDER BY CASE WHEN c.status='CURRENT' THEN 0 ELSE 1 END,"
                             "COALESCE(c.last_message_at,c.created_at) DESC,c.id DESC LIMIT :limit"
                         ),
@@ -585,131 +868,6 @@ class ButlerService:
             )
         return {"items": items, "next_cursor": next_cursor, "has_more": has_more}
 
-    async def create_conversation(
-        self, user_id: UUID, request: CreateConversationRequest
-    ) -> dict[str, object]:
-        """幂等创建会话并原子归档当前会话；外部等待不在事务内执行。"""
-
-        now = datetime.now(UTC)
-        async with self.database.transaction() as connection:
-            owner = _row(
-                await connection.execute(
-                    text("SELECT id FROM users WHERE id=:user_id FOR UPDATE"),
-                    {"user_id": user_id},
-                )
-            )
-            if owner is None:
-                raise not_found()
-            duplicate = _row(
-                await connection.execute(
-                    text(
-                        "SELECT c.*,ad.code AS specialist_code,ad.name AS specialist_name,"
-                        "ad.catalog_metadata AS specialist_metadata,NULL::uuid AS active_run_id,"
-                        "NULL::varchar AS active_run_status,NULL::text AS last_message_content,"
-                        "NULL::timestamptz AS last_message_created_at FROM conversations c "
-                        "LEFT JOIN user_agents ua ON ua.id=c.specialist_user_agent_id "
-                        "LEFT JOIN agent_definitions ad ON ad.id=ua.agent_definition_id "
-                        "WHERE c.user_id=:user_id AND c.client_conversation_id=:client_id"
-                    ),
-                    {"user_id": user_id, "client_id": request.client_conversation_id},
-                )
-            )
-            if duplicate:
-                if duplicate["specialist_code"] != request.specialist_code:
-                    raise conflict(
-                        "IDEMPOTENCY_KEY_REUSED",
-                        "会话标识已用于不同的专业助理，请重新创建",
-                    )
-                return self._conversation_response(duplicate)
-            await self._lock_user_and_check_global_run(connection, user_id)
-            specialist = await self._resolve_specialist(
-                connection, user_id, request.specialist_code
-            )
-            current = _row(
-                await connection.execute(
-                    text(
-                        "SELECT id FROM conversations WHERE user_id=:user_id AND status='CURRENT' FOR UPDATE"
-                    ),
-                    {"user_id": user_id},
-                )
-            )
-            if current:
-                await connection.execute(
-                    text(
-                        "UPDATE conversations SET status='ARCHIVED',archived_at=:now,updated_at=:now WHERE id=:id"
-                    ),
-                    {"id": current["id"], "now": now},
-                )
-            conversation_id = uuid4()
-            segment_id = uuid4()
-            title = f"{specialist['name']}助理" if specialist else "新的对话"
-            await connection.execute(
-                text(
-                    "INSERT INTO conversations(id,user_id,user_agent_id,active_segment_id,"
-                    "client_conversation_id,title,status,specialist_user_agent_id) "
-                    "VALUES(:id,:user_id,:butler,NULL,:client_id,:title,'CURRENT',:specialist)"
-                ),
-                {
-                    "id": conversation_id,
-                    "user_id": user_id,
-                    "butler": uuid5(user_id, "BUTLER"),
-                    "client_id": request.client_conversation_id,
-                    "title": title,
-                    "specialist": specialist["user_agent_id"] if specialist else None,
-                },
-            )
-            await connection.execute(
-                text(
-                    "INSERT INTO conversation_segments(id,conversation_id,user_id,sequence,thread_id,status) "
-                    "VALUES(:id,:conversation,:user_id,1,:thread,'ACTIVE')"
-                ),
-                {
-                    "id": segment_id,
-                    "conversation": conversation_id,
-                    "user_id": user_id,
-                    "thread": f"thread-{uuid4()}",
-                },
-            )
-            await connection.execute(
-                text("UPDATE conversations SET active_segment_id=:segment WHERE id=:id"),
-                {"segment": segment_id, "id": conversation_id},
-            )
-            last_message = None
-            if specialist:
-                message_id = uuid4()
-                welcome_message = specialist["welcome_message"]
-                await connection.execute(
-                    text(
-                        "INSERT INTO messages(id,user_id,conversation_id,segment_id,role,status,content) "
-                        "VALUES(:id,:user_id,:conversation,:segment,'ASSISTANT','COMPLETED',:content)"
-                    ),
-                    {
-                        "id": message_id,
-                        "user_id": user_id,
-                        "conversation": conversation_id,
-                        "segment": segment_id,
-                        "content": welcome_message,
-                    },
-                )
-                await connection.execute(
-                    text(
-                        "UPDATE conversations SET last_message_at=:now,updated_at=:now WHERE id=:id"
-                    ),
-                    {"now": now, "id": conversation_id},
-                )
-                last_message = {"content": welcome_message, "created_at": now}
-            return {
-                "id": conversation_id,
-                "title": title,
-                "status": "CURRENT",
-                "specialist": self._specialist_response(specialist),
-                "last_message": last_message,
-                "last_message_at": now if last_message else None,
-                "active_run": None,
-                "created_at": now,
-                "updated_at": now,
-            }
-
     async def get_conversation(self, user_id: UUID, conversation_id: UUID) -> dict[str, object]:
         """读取一个归属当前用户的会话，跨用户访问按不存在处理。"""
 
@@ -718,6 +876,41 @@ class ButlerService:
         if row is None:
             raise not_found()
         return self._conversation_response(row)
+
+    async def delete_conversation(self, user_id: UUID, conversation_id: UUID) -> None:
+        """软删除当前用户的已归档会话。
+
+        删除对同一用户幂等；已删除记录保留在数据库中，但所有公共会话读取与
+        消息入口都会将其视为不存在。CURRENT 会话必须先通过新建流程归档，
+        避免客户端失去唯一可继续的会话。
+        """
+
+        async with self.database.transaction() as connection:
+            conversation = _row(
+                await connection.execute(
+                    text(
+                        "SELECT id,status,deleted_at FROM conversations "
+                        "WHERE id=:conversation_id AND user_id=:user_id FOR UPDATE"
+                    ),
+                    {"conversation_id": conversation_id, "user_id": user_id},
+                )
+            )
+            if conversation is None:
+                raise not_found()
+            if conversation["deleted_at"] is not None:
+                return
+            if conversation["status"] != "ARCHIVED":
+                raise conflict(
+                    "CURRENT_CONVERSATION_DELETE_FORBIDDEN",
+                    "当前话题不能删除；开始其他话题后可在历史中删除",
+                )
+            await connection.execute(
+                text(
+                    "UPDATE conversations SET deleted_at=now(),updated_at=now() "
+                    "WHERE id=:conversation_id"
+                ),
+                {"conversation_id": conversation_id},
+            )
 
     async def list_messages(
         self,
@@ -750,7 +943,8 @@ class ButlerService:
             owned = _row(
                 await connection.execute(
                     text(
-                        "SELECT id FROM conversations WHERE id=:conversation_id AND user_id=:user_id"
+                        "SELECT id FROM conversations WHERE id=:conversation_id AND user_id=:user_id "
+                        "AND deleted_at IS NULL"
                     ),
                     parameters,
                 )
@@ -777,36 +971,30 @@ class ButlerService:
             next_cursor = _encode_cursor(last["created_at"], last["id"])
         return {"items": items, "next_cursor": next_cursor, "has_more": has_more}
 
-    async def send_message(
-        self, user_id: UUID, conversation_id: UUID, request: SendMessageRequest
-    ) -> dict[str, object]:
-        """提交消息或恢复等待输入的 run；事务提交前不返回。"""
+    async def send_message(self, user_id: UUID, request: SendMessageRequest) -> dict[str, object]:
+        """自动解析会话边界并提交消息；归档、创建和消息写入原子完成。"""
 
+        preflight_route = await self._preflight_conversation_route(user_id, request)
         now = datetime.now(UTC)
         async with self.database.transaction() as connection:
-            await connection.execute(
-                text("SELECT id FROM users WHERE id=:user_id FOR UPDATE"), {"user_id": user_id}
-            )
-            conversation = _row(
+            owner = _row(
                 await connection.execute(
-                    text(
-                        "SELECT * FROM conversations WHERE id=:conversation_id AND user_id=:user_id FOR UPDATE"
-                    ),
-                    {"conversation_id": conversation_id, "user_id": user_id},
+                    text("SELECT id FROM users WHERE id=:user_id FOR UPDATE"),
+                    {"user_id": user_id},
                 )
             )
-            if conversation is None:
+            if owner is None:
                 raise not_found()
             duplicate = _row(
                 await connection.execute(
                     text(
-                        "SELECT m.id AS user_message_id,m.client_request_hash,r.id AS run_id,"
-                        "r.response_message_id,r.status,r.attempt "
+                        "SELECT m.id AS user_message_id,m.client_request_hash,m.conversation_id,"
+                        "r.id AS run_id,r.response_message_id,r.status,r.attempt "
                         "FROM messages m JOIN agent_runs r ON r.request_message_id=m.id "
-                        "WHERE m.conversation_id=:conversation_id AND m.client_message_id=:client_id"
+                        "WHERE m.user_id=:user_id AND m.client_message_id=:client_id"
                     ),
                     {
-                        "conversation_id": conversation_id,
+                        "user_id": user_id,
                         "client_id": request.client_message_id,
                     },
                 )
@@ -814,27 +1002,40 @@ class ButlerService:
             if duplicate:
                 if duplicate.pop("client_request_hash") != _message_request_hash(request):
                     raise conflict("IDEMPOTENCY_KEY_REUSED", "消息标识已用于不同内容，请重新发送")
-                return self._send_response(conversation, duplicate)
-            global_active = _row(
+                conversation = _row(
+                    await connection.execute(
+                        text("SELECT * FROM conversations WHERE id=:id AND user_id=:user_id"),
+                        {"id": duplicate["conversation_id"], "user_id": user_id},
+                    )
+                )
+                if conversation is None:
+                    raise not_found()
+                response = self._send_response(conversation, duplicate)
+                response["transition"] = {
+                    "kind": "CONTINUED",
+                    "archived_conversation_id": None,
+                }
+                return response
+
+            conversation, transition = await self._resolve_message_conversation(
+                connection, user_id, request, now, preflight_route
+            )
+            active = _row(
                 await connection.execute(
                     text(
-                        f"SELECT * FROM agent_runs WHERE user_id=:user_id AND status IN ({NON_TERMINAL_RUN_SQL}) "  # noqa: S608
+                        f"SELECT * FROM agent_runs WHERE conversation_id=:conversation_id "  # noqa: S608
+                        f"AND status IN ({NON_TERMINAL_RUN_SQL}) "
                         "FOR UPDATE"
                     ),
-                    {"user_id": user_id},
+                    {"conversation_id": conversation["id"]},
                 )
             )
-            if global_active and global_active["conversation_id"] != conversation_id:
-                raise ButlerError(
-                    "GLOBAL_RUN_IN_PROGRESS",
-                    "另一个对话正在处理中",
-                    409,
-                    details={
-                        "run_id": str(global_active["id"]),
-                        "conversation_id": str(global_active["conversation_id"]),
-                    },
-                )
-            active = global_active
+            await self._reserve_execution_slot(
+                connection,
+                user_id,
+                UUID(str(active["id"])) if active else None,
+                request.execution_policy,
+            )
             if active and active["status"] != "AWAITING_INPUT":
                 error_by_status = {
                     "AWAITING_APPROVAL": ("APPROVAL_REQUIRED", "请使用计划卡片完成审批"),
@@ -844,21 +1045,6 @@ class ButlerService:
                     active["status"], ("CONVERSATION_BUSY", "管家正在处理上一条消息")
                 )
                 raise conflict(code, message)
-            if conversation["status"] == "ARCHIVED":
-                await connection.execute(
-                    text(
-                        "UPDATE conversations SET status='ARCHIVED',archived_at=:now,updated_at=:now "
-                        "WHERE user_id=:user_id AND status='CURRENT' AND id<>:id"
-                    ),
-                    {"user_id": user_id, "id": conversation_id, "now": now},
-                )
-                await connection.execute(
-                    text(
-                        "UPDATE conversations SET status='CURRENT',archived_at=NULL,updated_at=:now WHERE id=:id"
-                    ),
-                    {"id": conversation_id, "now": now},
-                )
-                conversation["status"] = "CURRENT"
             submitted_content = request.content.strip()
             submitted_context: dict[str, object] | None = None
             if request.selection is not None:
@@ -999,9 +1185,9 @@ class ButlerService:
             await connection.execute(
                 text(
                     "INSERT INTO messages(id,user_id,conversation_id,segment_id,agent_run_id,client_message_id,"
-                    "client_request_hash,role,status,content,structured_content) "
+                    "client_request_hash,role,status,content,structured_content,created_at) "
                     "VALUES(:id,:user_id,:conversation_id,:segment_id,:run_id,:client_id,:request_hash,"
-                    "'USER','COMPLETED',:content,CAST(:structured AS jsonb))"
+                    "'USER','COMPLETED',:content,CAST(:structured AS jsonb),:created_at)"
                 ),
                 {
                     "id": user_message_id,
@@ -1013,12 +1199,13 @@ class ButlerService:
                     "request_hash": _message_request_hash(request),
                     "content": submitted_content,
                     "structured": _json(submitted_context or {}),
+                    "created_at": now,
                 },
             )
             await connection.execute(
                 text(
-                    "INSERT INTO messages(id,user_id,conversation_id,segment_id,agent_run_id,role,status,content) "
-                    "VALUES(:id,:user_id,:conversation_id,:segment_id,:run_id,'ASSISTANT','PENDING','')"
+                    "INSERT INTO messages(id,user_id,conversation_id,segment_id,agent_run_id,role,status,content,created_at) "
+                    "VALUES(:id,:user_id,:conversation_id,:segment_id,:run_id,'ASSISTANT','PENDING','',:created_at)"
                 ),
                 {
                     "id": assistant_message_id,
@@ -1026,6 +1213,7 @@ class ButlerService:
                     "conversation_id": conversation["id"],
                     "segment_id": segment_id,
                     "run_id": run_id,
+                    "created_at": now + timedelta(microseconds=1),
                 },
             )
             if not active:
@@ -1116,6 +1304,7 @@ class ButlerService:
                 "attempt": int(active["attempt"]) if active else 0,
             }
         response = self._send_response(conversation, result)
+        response["transition"] = transition
         response["run"]["execution_mode"] = execution_mode  # type: ignore[index]
         response["stream"]["last_sequence"] = sequence  # type: ignore[index]
         return response
@@ -1239,9 +1428,37 @@ class ButlerService:
             return {"run_id": run_id, "status": status}
 
     async def retry_run(
-        self, user_id: UUID, run_id: UUID, expected_attempt: int
+        self,
+        user_id: UUID,
+        run_id: UUID,
+        expected_attempt: int,
+        execution_policy: str = "REJECT",
     ) -> dict[str, object]:
         async with self.database.transaction() as connection:
+            owner = _row(
+                await connection.execute(
+                    text("SELECT id FROM users WHERE id=:user_id FOR UPDATE"),
+                    {"user_id": user_id},
+                )
+            )
+            if owner is None:
+                raise not_found()
+            run = _row(
+                await connection.execute(
+                    text(
+                        "SELECT id,status,attempt FROM agent_runs WHERE id=:id "
+                        "AND user_id=:user_id FOR UPDATE"
+                    ),
+                    {"id": run_id, "user_id": user_id},
+                )
+            )
+            if (
+                run is None
+                or run["status"] != "FAILED_RETRYABLE"
+                or int(run["attempt"]) != expected_attempt
+            ):
+                raise conflict("RUN_RETRY_CONFLICT", "运行状态或尝试次数已更新")
+            await self._reserve_execution_slot(connection, user_id, run_id, execution_policy)
             result = await connection.execute(
                 text(
                     "UPDATE agent_runs SET status='QUEUED',pending_action='RETRY',attempt=attempt+1,"
@@ -1267,6 +1484,14 @@ class ButlerService:
         if approval_id != request.approval_id:
             raise ButlerError("APPROVAL_ID_MISMATCH", "审批标识不匹配", 400)
         async with self.database.transaction() as connection:
+            owner = _row(
+                await connection.execute(
+                    text("SELECT id FROM users WHERE id=:user_id FOR UPDATE"),
+                    {"user_id": user_id},
+                )
+            )
+            if owner is None:
+                raise not_found()
             approval = _row(
                 await connection.execute(
                     text(
@@ -1289,6 +1514,10 @@ class ButlerService:
                         "current_approval_version": int(approval["approval_version"]),
                     },
                 )
+            run_id = UUID(str(approval["agent_run_id"]))
+            await self._reserve_execution_slot(
+                connection, user_id, run_id, request.execution_policy
+            )
             items = (
                 (
                     await connection.execute(
@@ -1327,7 +1556,6 @@ class ButlerService:
                     "id": approval_id,
                 },
             )
-            run_id = UUID(str(approval["agent_run_id"]))
             await connection.execute(
                 text(
                     "UPDATE agent_runs SET status='QUEUED',pending_action='APPROVAL_RESUME',"
@@ -1963,7 +2191,8 @@ class ButlerService:
                 )
                 await connection.execute(
                     text(
-                        "UPDATE users SET nickname=NULL,status='DELETED',deleted_at=now(),updated_at=now() WHERE id=:id"
+                        "UPDATE users SET nickname=NULL,phone_ciphertext=NULL,status='DELETED',"
+                        "deleted_at=now(),updated_at=now() WHERE id=:id"
                     ),
                     {"id": deleting["id"]},
                 )
@@ -3117,6 +3346,10 @@ class ButlerService:
             )
             if run is None:
                 return
+            # 新建会话可以在 Worker 进行外部调用时立即取消旧 run；异常路径也
+            # 必须尊重取消事实，不能把 CANCELLED 覆盖成失败并重新暴露旧回复。
+            if run["status"] in {"CANCELLED", "CANCEL_REQUESTED"}:
+                return
             status = "FAILED_RETRYABLE" if error.retryable else "FAILED_FINAL"
             await connection.execute(
                 text(
@@ -3420,37 +3653,362 @@ class ButlerService:
         row["avatar_url"] = None
         return row
 
-    async def _lock_user_and_check_global_run(
-        self, connection: AsyncConnection, user_id: UUID
-    ) -> None:
-        """锁定用户级会话切换边界，并拒绝存在非终态 run 时的新建/恢复。"""
+    async def _preflight_conversation_route(
+        self, user_id: UUID, request: SendMessageRequest
+    ) -> tuple[UUID, datetime, ConversationRouteDecision] | None:
+        """在事务外完成可能调用模型的语义判断。
 
-        owner = _row(
-            await connection.execute(
-                text("SELECT id FROM users WHERE id=:user_id FOR UPDATE"), {"user_id": user_id}
+        提交事务会重新校验会话更新时间；若预检期间上下文发生变化，则失败安全地
+        延续当前会话。这里不写数据，也不把输入或模型输出写入日志。
+        """
+
+        if (
+            request.context_policy != "AUTO"
+            or request.target_conversation_id is not None
+            or request.specialist_code is not None
+            or request.selection is not None
+            or not request.content.strip()
+        ):
+            return None
+        async with self.database.connect() as connection:
+            current = _row(
+                await connection.execute(
+                    text(
+                        "SELECT id,title,updated_at,COALESCE(last_message_at,created_at) AS activity_at "
+                        "FROM conversations WHERE user_id=:user_id AND status='CURRENT' "
+                        "AND deleted_at IS NULL"
+                    ),
+                    {"user_id": user_id},
+                )
+            )
+            if current is None:
+                return None
+            recent_rows = (
+                (
+                    await connection.execute(
+                        text(
+                            "SELECT content FROM messages WHERE conversation_id=:conversation_id "
+                            "AND role IN ('USER','ASSISTANT') AND content<>'' "
+                            "ORDER BY created_at DESC,id DESC LIMIT 6"
+                        ),
+                        {"conversation_id": current["id"]},
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        activity_at = current["activity_at"]
+        idle_seconds = max(0, int((datetime.now(UTC) - activity_at).total_seconds()))
+        decision = await self.conversation_router.route(
+            ConversationRouteRequest(
+                current_title=str(current["title"]),
+                recent_messages=tuple(reversed([str(item) for item in recent_rows])),
+                user_input=request.content,
+                idle_seconds=idle_seconds,
             )
         )
-        if owner is None:
-            raise not_found()
-        active = _row(
+        return UUID(str(current["id"])), current["updated_at"], decision
+
+    async def _resolve_message_conversation(
+        self,
+        connection: AsyncConnection,
+        user_id: UUID,
+        request: SendMessageRequest,
+        now: datetime,
+        preflight_route: tuple[UUID, datetime, ConversationRouteDecision] | None,
+    ) -> tuple[dict[str, Any], dict[str, object]]:
+        """在已锁定用户的事务中确定真实会话，并执行必要的场景切换。"""
+
+        current = _row(
             await connection.execute(
                 text(
-                    f"SELECT id,conversation_id,status FROM agent_runs WHERE user_id=:user_id "  # noqa: S608
-                    f"AND status IN ({NON_TERMINAL_RUN_SQL}) FOR UPDATE"
+                    "SELECT c.*,EXISTS (SELECT 1 FROM messages m WHERE m.conversation_id=c.id "
+                    "AND m.role='USER') AS has_user_message FROM conversations c "
+                    "WHERE c.user_id=:user_id AND c.status='CURRENT' AND c.deleted_at IS NULL "
+                    "FOR UPDATE"
                 ),
                 {"user_id": user_id},
             )
         )
-        if active:
-            raise ButlerError(
-                "GLOBAL_RUN_IN_PROGRESS",
-                "当前有对话正在处理中",
-                409,
-                details={
-                    "run_id": str(active["id"]),
-                    "conversation_id": str(active["conversation_id"]),
-                },
+        if current is None:
+            current = await self._insert_automatic_conversation(connection, user_id, None, now)
+
+        if request.target_conversation_id is not None:
+            target = _row(
+                await connection.execute(
+                    text(
+                        "SELECT * FROM conversations WHERE id=:id AND user_id=:user_id "
+                        "AND deleted_at IS NULL FOR UPDATE"
+                    ),
+                    {"id": request.target_conversation_id, "user_id": user_id},
+                )
             )
+            if target is None:
+                raise not_found()
+            if target["id"] == current["id"]:
+                return target, {"kind": "CONTINUED", "archived_conversation_id": None}
+            archived = await self._activate_conversation(
+                connection, current, target, now, "HISTORY_RESUME"
+            )
+            return target, {"kind": "RESUMED", "archived_conversation_id": archived}
+
+        if request.specialist_code is not None:
+            specialist = await self._resolve_specialist(
+                connection, user_id, request.specialist_code
+            )
+            assert specialist is not None
+            if current.get("specialist_user_agent_id") == specialist["user_agent_id"]:
+                return current, {"kind": "CONTINUED", "archived_conversation_id": None}
+            suspended = _row(
+                await connection.execute(
+                    text(
+                        f"SELECT c.* FROM conversations c JOIN agent_runs r "  # noqa: S608
+                        "ON r.conversation_id=c.id WHERE c.user_id=:user_id "
+                        "AND c.specialist_user_agent_id=:specialist AND c.deleted_at IS NULL "
+                        f"AND r.status IN ({SUSPENDED_RUN_SQL}) "
+                        "ORDER BY COALESCE(c.last_message_at,c.created_at) DESC LIMIT 1 FOR UPDATE OF c"
+                    ),
+                    {"user_id": user_id, "specialist": specialist["user_agent_id"]},
+                )
+            )
+            if suspended is not None:
+                archived = await self._activate_conversation(
+                    connection, current, suspended, now, "SPECIALIST_SWITCH"
+                )
+                return suspended, {
+                    "kind": "RESUMED",
+                    "archived_conversation_id": archived,
+                }
+            await self._reserve_execution_slot(connection, user_id, None, "CANCEL_OTHER")
+            archived = await self._archive_or_discard_current(
+                connection, current, now, "SPECIALIST_SWITCH"
+            )
+            created = await self._insert_automatic_conversation(
+                connection, user_id, specialist, now
+            )
+            return created, {"kind": "CREATED", "archived_conversation_id": archived}
+
+        if request.context_policy == "CONTINUE_CURRENT":
+            return current, {"kind": "CONTINUED", "archived_conversation_id": None}
+
+        if request.context_policy == "ARCHIVE_AND_START":
+            archived = await self._archive_or_discard_current(
+                connection, current, now, "TOPIC_SWITCH"
+            )
+            created = await self._insert_automatic_conversation(connection, user_id, None, now)
+            return created, {"kind": "CREATED", "archived_conversation_id": archived}
+
+        active = _row(
+            await connection.execute(
+                text(
+                    f"SELECT id,status FROM agent_runs WHERE conversation_id=:conversation_id "  # noqa: S608
+                    f"AND status IN ({NON_TERMINAL_RUN_SQL}) FOR UPDATE"
+                ),
+                {"conversation_id": current["id"]},
+            )
+        )
+        if not current.get("has_user_message"):
+            return current, {"kind": "CREATED", "archived_conversation_id": None}
+        if preflight_route is None:
+            return current, {"kind": "CONTINUED", "archived_conversation_id": None}
+        expected_id, expected_updated_at, decision = preflight_route
+        if expected_id != current["id"] or expected_updated_at != current["updated_at"]:
+            return current, {"kind": "CONTINUED", "archived_conversation_id": None}
+        if decision.route == ConversationRoute.CONTINUE:
+            return current, {"kind": "CONTINUED", "archived_conversation_id": None}
+        if (
+            decision.route == ConversationRoute.AMBIGUOUS
+            or decision.confidence < self.settings.conversation_topic_confidence
+            or active is not None
+        ):
+            raise ButlerError(
+                "TOPIC_SWITCH_CONFIRMATION_REQUIRED",
+                "这看起来可能是一个新话题，请确认如何继续",
+                409,
+                False,
+                {"reason_code": decision.reason_code},
+            )
+        archived = await self._archive_or_discard_current(connection, current, now, "TOPIC_SWITCH")
+        created = await self._insert_automatic_conversation(connection, user_id, None, now)
+        return created, {"kind": "CREATED", "archived_conversation_id": archived}
+
+    async def _insert_automatic_conversation(
+        self,
+        connection: AsyncConnection,
+        user_id: UUID,
+        specialist: dict[str, Any] | None,
+        now: datetime,
+    ) -> dict[str, Any]:
+        """创建首条消息即将写入的场景，不持久化欢迎消息或空历史。"""
+
+        conversation_id = uuid4()
+        segment_id = uuid4()
+        title = f"{specialist['name']}助理" if specialist else "新的对话"
+        await connection.execute(
+            text(
+                "INSERT INTO conversations(id,user_id,user_agent_id,active_segment_id,"
+                "client_conversation_id,title,status,specialist_user_agent_id,created_at,updated_at) "
+                "VALUES(:id,:user_id,:butler,NULL,:client_id,:title,'CURRENT',:specialist,:now,:now)"
+            ),
+            {
+                "id": conversation_id,
+                "user_id": user_id,
+                "butler": uuid5(user_id, "BUTLER"),
+                "client_id": conversation_id,
+                "title": title,
+                "specialist": specialist["user_agent_id"] if specialist else None,
+                "now": now,
+            },
+        )
+        await connection.execute(
+            text(
+                "INSERT INTO conversation_segments(id,conversation_id,user_id,sequence,thread_id,status) "
+                "VALUES(:id,:conversation,:user_id,1,:thread,'ACTIVE')"
+            ),
+            {
+                "id": segment_id,
+                "conversation": conversation_id,
+                "user_id": user_id,
+                "thread": f"thread-{uuid4()}",
+            },
+        )
+        row = _row(
+            await connection.execute(
+                text(
+                    "UPDATE conversations SET active_segment_id=:segment WHERE id=:id RETURNING *"
+                ),
+                {"segment": segment_id, "id": conversation_id},
+            )
+        )
+        if row is None:
+            raise RuntimeError("conversation update returned no row")
+        return row
+
+    async def _archive_or_discard_current(
+        self,
+        connection: AsyncConnection,
+        current: dict[str, Any],
+        now: datetime,
+        reason: str,
+    ) -> UUID | None:
+        has_user_message = current.get("has_user_message")
+        if has_user_message is None:
+            has_user_message = bool(
+                (
+                    await connection.execute(
+                        text(
+                            "SELECT EXISTS (SELECT 1 FROM messages WHERE conversation_id=:id "
+                            "AND role='USER')"
+                        ),
+                        {"id": current["id"]},
+                    )
+                ).scalar_one()
+            )
+        if not has_user_message:
+            await connection.execute(
+                text(
+                    "UPDATE conversations SET deleted_at=:now,updated_at=:now "
+                    "WHERE id=:id AND status='CURRENT'"
+                ),
+                {"id": current["id"], "now": now},
+            )
+            return None
+        await connection.execute(
+            text(
+                "UPDATE conversations SET status='ARCHIVED',archived_at=:now,archive_reason=:reason,"
+                "updated_at=:now WHERE id=:id AND status='CURRENT'"
+            ),
+            {"id": current["id"], "now": now, "reason": reason},
+        )
+        return UUID(str(current["id"]))
+
+    async def _activate_conversation(
+        self,
+        connection: AsyncConnection,
+        current: dict[str, Any],
+        target: dict[str, Any],
+        now: datetime,
+        reason: str,
+    ) -> UUID | None:
+        archived = await self._archive_or_discard_current(connection, current, now, reason)
+        await connection.execute(
+            text(
+                "UPDATE conversations SET status='CURRENT',archived_at=NULL,archive_reason=NULL,"
+                "updated_at=:now WHERE id=:id"
+            ),
+            {"id": target["id"], "now": now},
+        )
+        target["status"] = "CURRENT"
+        target["archived_at"] = None
+        target["archive_reason"] = None
+        target["updated_at"] = now
+        return archived
+
+    async def _reserve_execution_slot(
+        self,
+        connection: AsyncConnection,
+        user_id: UUID,
+        target_run_id: UUID | None,
+        execution_policy: str,
+    ) -> None:
+        executing = _row(
+            await connection.execute(
+                text(
+                    f"SELECT id,conversation_id,status,attempt FROM agent_runs "  # noqa: S608
+                    f"WHERE user_id=:user_id AND status IN ({EXECUTING_RUN_SQL}) FOR UPDATE"
+                ),
+                {"user_id": user_id},
+            )
+        )
+        if executing is None or (
+            target_run_id is not None and UUID(str(executing["id"])) == target_run_id
+        ):
+            return
+        if execution_policy != "CANCEL_OTHER":
+            raise ButlerError(
+                "OTHER_CONVERSATION_RUNNING",
+                "另一个话题仍在处理中，请确认是否停止后切换",
+                409,
+            )
+        await self._cancel_run_row(connection, user_id, executing, "CONVERSATION_SWITCH")
+
+    async def _cancel_run_row(
+        self,
+        connection: AsyncConnection,
+        user_id: UUID,
+        run: dict[str, Any],
+        reason: str,
+    ) -> None:
+        await connection.execute(
+            text(
+                "UPDATE agent_runs SET status='CANCELLED',cancel_requested_at=now(),updated_at=now() "
+                "WHERE id=:id"
+            ),
+            {"id": run["id"]},
+        )
+        await connection.execute(
+            text(
+                "UPDATE messages SET status='CANCELLED',updated_at=now() "
+                "WHERE agent_run_id=:run_id AND role='ASSISTANT' "
+                "AND status IN ('PENDING','STREAMING')"
+            ),
+            {"run_id": run["id"]},
+        )
+        await connection.execute(
+            text(
+                "UPDATE approval_decisions SET status='EXPIRED',decided_at=now() "
+                "WHERE agent_run_id=:run_id AND status='PENDING'"
+            ),
+            {"run_id": run["id"]},
+        )
+        await self._append_event(
+            connection,
+            UUID(str(run["id"])),
+            user_id,
+            "run.cancelled",
+            {"reason": reason},
+            int(run["attempt"]),
+        )
 
     async def _resolve_specialist(
         self, connection: AsyncConnection, user_id: UUID, specialist_code: str | None
@@ -3494,7 +4052,8 @@ class ButlerService:
                     "LEFT JOIN LATERAL (SELECT content,created_at FROM messages "
                     "WHERE conversation_id=c.id AND role IN ('USER','ASSISTANT') "
                     "ORDER BY created_at DESC,id DESC LIMIT 1) lm ON true "
-                    "WHERE c.id=:conversation_id AND c.user_id=:user_id"
+                    "WHERE c.id=:conversation_id AND c.user_id=:user_id "
+                    "AND c.deleted_at IS NULL"
                 ),
                 {"conversation_id": conversation_id, "user_id": user_id},
             )

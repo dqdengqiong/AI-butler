@@ -5,12 +5,14 @@ import { storeToRefs } from 'pinia'
 import AppSheet from '@/components/AppSheet.vue'
 import ChatView from '@/components/ChatView.vue'
 import ConversationDrawer from '@/components/ConversationDrawer.vue'
+import LoginView from '@/components/LoginView.vue'
 import PlansView from '@/components/PlansView.vue'
 import { butlerApi, type ApiObject, type CitationResponse } from '@/api/butler'
+import { ApiError } from '@/api/client'
 import { chooseFile } from '@/platform/files'
 import { openSourceLink } from '@/platform/source-links'
 import { useAuthStore } from '@/stores/auth'
-import { useButlerStore } from '@/stores/butler'
+import { useButlerStore, type AssistantSceneTarget } from '@/stores/butler'
 import type {
   AgentShortcutCode,
   ChatItem,
@@ -26,10 +28,17 @@ type PlanChatItem = Extract<ChatItem, { kind: 'plan' }>
 const auth = useAuthStore()
 const butler = useButlerStore()
 const { authenticated: loggedIn, user } = storeToRefs(auth)
-const { plans, tasks, chatItems, agentShortcuts, conversations, activeConversationId } =
-  storeToRefs(butler)
+const {
+  plans,
+  tasks,
+  chatItems,
+  agentShortcuts,
+  conversations,
+  activeConversationId,
+  stagedScene,
+  stagedSpecialistCode,
+} = storeToRefs(butler)
 
-const agreementAccepted = ref(false)
 const activeTab = ref<MainTab>('chat')
 const activeSheet = ref<SheetName>(null)
 const conversationDrawerOpen = ref(false)
@@ -45,16 +54,22 @@ const submittingApprovalIds = new Set<string>()
 
 const displayName = computed(() => user.value?.nickname || '小邓')
 const appReady = computed(() => loggedIn.value)
-const activeConversation = computed(
-  () =>
-    conversations.value.find((item) => item.key === activeConversationId.value) ??
-    conversations.value[0],
+const activeConversation = computed(() =>
+  conversations.value.find((item) => item.key === activeConversationId.value),
 )
-const activeAgentCode = computed(() => activeConversation.value?.agentCode)
+const activeAgentCode = computed(() => {
+  if (stagedScene.value?.kind === 'GENERAL') return undefined
+  return stagedSpecialistCode.value ?? activeConversation.value?.agentCode
+})
 const activeAgent = computed(() =>
   agentShortcuts.value.find((agent) => agent.code === activeAgentCode.value),
 )
 const activeChatItems = computed(() => chatItems.value)
+const activeAssistantSubtitle = computed(() => {
+  const status = activeConversation.value?.statusLabel
+  if (status && status !== '已完成') return status
+  return activeAgent.value ? `${activeAgent.value.name}助理在线` : 'AI 管家在线'
+})
 
 const demoPlans: PlanViewModel[] = [
   {
@@ -155,17 +170,8 @@ onMounted(async () => {
   }
 })
 
-async function login(): Promise<void> {
-  if (!agreementAccepted.value) {
-    uni.showToast({ title: '请先阅读并同意服务协议与隐私政策', icon: 'none' })
-    return
-  }
-  try {
-    await auth.login()
-    await Promise.all([butler.load(token()), loadPreferences()])
-  } catch (error) {
-    uni.showToast({ title: error instanceof Error ? error.message : '登录失败', icon: 'none' })
-  }
+async function onAuthenticated(): Promise<void> {
+  await Promise.all([butler.load(token()), loadPreferences()])
 }
 
 function navigate(target: MainTab): void {
@@ -173,26 +179,63 @@ function navigate(target: MainTab): void {
 }
 
 /**
- * 创建普通会话。自动归档当前会话由服务端同一事务完成，客户端刷新列表接受事实。
+ * 从输入框快捷栏进入专业 Agent。
+ *
+ * 未开放能力只提示；已开放能力先进入本地欢迎态，用户发送第一条消息时才落库。
+ * 若该助理有挂起任务，则优先打开最近一次未完成会话。
  */
-async function createConversation(): Promise<void> {
+function assistantStatus(agentCode: AgentShortcutCode | null): string | null {
+  return (
+    conversations.value.find((item) => {
+      const matches =
+        agentCode === null ? item.agentCode === undefined : item.agentCode === agentCode
+      return matches && item.statusLabel !== '已完成'
+    })?.statusLabel ?? null
+  )
+}
+
+function isAssistantCurrent(agentCode: AgentShortcutCode | null): boolean {
+  if (stagedScene.value) {
+    return stagedScene.value.kind === 'GENERAL'
+      ? agentCode === null
+      : stagedScene.value.specialistCode === agentCode
+  }
+  return agentCode === null
+    ? activeConversation.value?.agentCode === undefined
+    : activeConversation.value?.agentCode === agentCode
+}
+
+async function selectAssistant(agentCode: AgentShortcutCode | null): Promise<void> {
+  const target: AssistantSceneTarget =
+    agentCode === null ? { kind: 'GENERAL' } : { kind: 'SPECIALIST', specialistCode: agentCode }
+  const label =
+    agentCode === null
+      ? 'AI 管家'
+      : `${agentShortcuts.value.find((item) => item.code === agentCode)?.name ?? '专业'}助理`
   try {
-    await butler.createConversation(token())
-    conversationDrawerOpen.value = false
+    let result = await butler.switchAssistantScene(target, token())
+    if (result === 'CONFIRMATION_REQUIRED') {
+      const confirmed = await confirmSwitch(
+        '停止当前处理并切换？',
+        `当前任务仍在处理中，切换到${label}会停止这次处理。`,
+        '停止并切换',
+      )
+      if (!confirmed) return
+      result = await butler.switchAssistantScene(target, token(), { cancelExecuting: true })
+    }
+    if (result === 'CONFIRMATION_REQUIRED') return
+    activeSheet.value = null
     activeTab.value = 'chat'
     attachments.value = []
-    uni.showToast({ title: '已新建对话，上一段已归档', icon: 'none' })
+    editingPlan.value = null
+    if (result === 'RESUMABLE') {
+      uni.showToast({ title: `已恢复${label}的未完成任务`, icon: 'none' })
+    }
   } catch (error) {
-    uni.showToast({ title: error instanceof Error ? error.message : '新建失败', icon: 'none' })
+    uni.showToast({ title: error instanceof Error ? error.message : '切换失败', icon: 'none' })
   }
 }
 
-/**
- * 从输入框快捷栏进入专业 Agent。
- *
- * 未开放能力只提示；已开放能力用公开 code 创建专属会话。欢迎语和历史记录均由
- * 服务端持久化，客户端永远不接触内部 user_agent_id。
- */
 async function activateAgent(agentCode: AgentShortcutCode): Promise<void> {
   const agent = agentShortcuts.value.find((item) => item.code === agentCode)
   if (!agent) return
@@ -200,19 +243,20 @@ async function activateAgent(agentCode: AgentShortcutCode): Promise<void> {
     uni.showToast({ title: `${agent.name}助理即将开放`, icon: 'none' })
     return
   }
-  if (activeConversation.value?.agentCode === agentCode) {
-    uni.showToast({ title: `当前已是${agent.name}助理`, icon: 'none' })
-    return
-  }
+  await selectAssistant(agent.code)
+}
 
-  try {
-    await butler.createConversation(token(), agent.code)
-    activeTab.value = 'chat'
-    attachments.value = []
-    uni.showToast({ title: `已进入${agent.name}助理`, icon: 'none' })
-  } catch (error) {
-    uni.showToast({ title: error instanceof Error ? error.message : '进入失败', icon: 'none' })
-  }
+function confirmSwitch(title: string, content: string, confirmText: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    uni.showModal({
+      title,
+      content,
+      confirmText,
+      cancelText: '继续当前话题',
+      success: (result) => resolve(result.confirm),
+      fail: () => resolve(false),
+    })
+  })
 }
 
 async function selectConversation(conversationKey: string): Promise<void> {
@@ -224,6 +268,29 @@ async function selectConversation(conversationKey: string): Promise<void> {
   } catch (error) {
     uni.showToast({ title: error instanceof Error ? error.message : '对话加载失败', icon: 'none' })
   }
+}
+
+function deleteConversation(conversationKey: string): void {
+  const conversation = conversations.value.find((item) => item.key === conversationKey)
+  if (!conversation?.archived) return
+  uni.showModal({
+    title: '删除历史对话？',
+    content: `“${conversation.title}”将从历史记录中移除，删除后无法恢复。`,
+    confirmText: '删除',
+    confirmColor: '#d44b55',
+    success(result) {
+      if (!result.confirm) return
+      void butler
+        .deleteConversation(conversationKey, token())
+        .then(() => uni.showToast({ title: '历史对话已删除', icon: 'success' }))
+        .catch((error: unknown) => {
+          uni.showToast({
+            title: error instanceof Error ? error.message : '删除失败',
+            icon: 'none',
+          })
+        })
+    },
+  })
 }
 
 async function completeTask(taskKey: string): Promise<void> {
@@ -278,6 +345,14 @@ async function approvePlan(item: PlanChatItem): Promise<void> {
   try {
     await butler.approvePlan(item, 'APPROVE', token())
   } catch (error) {
+    if (
+      error instanceof ApiError &&
+      error.code === 'OTHER_CONVERSATION_RUNNING' &&
+      (await confirmSwitch('另一项任务正在处理', '停止当前处理并确认这份计划吗？', '停止并确认'))
+    ) {
+      await butler.approvePlan(item, 'APPROVE', token(), undefined, 'CANCEL_OTHER')
+      return
+    }
     uni.showToast({ title: error instanceof Error ? error.message : '审批失败', icon: 'none' })
   } finally {
     submittingApprovalIds.delete(item.approvalId)
@@ -293,20 +368,70 @@ function editPlan(item: PlanChatItem): void {
 
 async function sendMessage(content: string): Promise<void> {
   const normalized = content.trim()
+  const clientMessageId = `message-${Date.now()}-${Math.random().toString(36).slice(2)}`
   try {
     if (editingPlan.value) {
       await butler.approvePlan(editingPlan.value, 'EDIT', token(), normalized)
       editingPlan.value = null
     } else {
-      await butler.sendMessage(
+      const wasStagedWelcome = stagedScene.value !== null
+      const response = await butler.sendMessage(
         normalized || '请处理我添加的资料',
         token(),
         undefined,
         attachments.value.map((item) => item.id),
+        { clientMessageId },
       )
+      if (response.transition.kind === 'CREATED' && !wasStagedWelcome) {
+        uni.showToast({ title: '已为你整理为新话题', icon: 'none' })
+      }
     }
     attachments.value = []
   } catch (error) {
+    if (error instanceof ApiError && error.code === 'TOPIC_SWITCH_CONFIRMATION_REQUIRED') {
+      const confirmed = await confirmSwitch(
+        '开始新话题？',
+        '我可以暂存当前话题，并从这条消息开始整理为新话题。',
+        '开始新话题',
+      )
+      if (confirmed) {
+        const response = await butler.sendMessage(
+          normalized || '请处理我添加的资料',
+          token(),
+          undefined,
+          attachments.value.map((item) => item.id),
+          {
+            clientMessageId,
+            contextPolicy: 'ARCHIVE_AND_START',
+            executionPolicy: 'CANCEL_OTHER',
+          },
+        )
+        attachments.value = []
+        if (response.transition.kind === 'CREATED') {
+          uni.showToast({ title: '已为你整理为新话题', icon: 'none' })
+        }
+        return
+      }
+      return
+    }
+    if (error instanceof ApiError && error.code === 'OTHER_CONVERSATION_RUNNING') {
+      const confirmed = await confirmSwitch(
+        '另一项任务正在处理',
+        '是否停止当前处理并切换到这里？',
+        '停止并切换',
+      )
+      if (confirmed) {
+        await butler.sendMessage(
+          normalized || '请处理我添加的资料',
+          token(),
+          undefined,
+          attachments.value.map((item) => item.id),
+          { clientMessageId, executionPolicy: 'CANCEL_OTHER' },
+        )
+        attachments.value = []
+      }
+      return
+    }
     uni.showToast({ title: error instanceof Error ? error.message : '发送失败', icon: 'none' })
   }
 }
@@ -497,43 +622,7 @@ async function openHistory(): Promise<void> {
 </script>
 
 <template>
-  <view v-if="!appReady" class="auth-screen">
-    <view class="auth-card">
-      <view class="auth-orbit orbit-one" />
-      <view class="auth-orbit orbit-two" />
-      <view class="auth-brand">
-        <view class="auth-logo">AI</view>
-        <text class="auth-kicker">AI PERSONAL BUTLER</text>
-        <text class="auth-title">你的 AI 个人管家</text>
-        <text class="auth-description"
-          >一个入口，帮你规划目标、跟进任务，并在每次变更前征得确认。</text
-        >
-      </view>
-
-      <view class="feature-list">
-        <view><text class="feature-icon blue">规</text><text>把目标拆成可执行计划</text></view>
-        <view><text class="feature-icon mint">跟</text><text>每天汇总任务与进度</text></view>
-        <view
-          ><text class="feature-icon orange">引</text
-          ><text>联网检索附引用，计划调整需确认</text></view
-        >
-      </view>
-
-      <button class="wechat-button" @click="login">
-        <text class="wechat-icon">微</text>
-        <text>微信一键登录</text>
-      </button>
-      <label class="agreement-row" @click="agreementAccepted = !agreementAccepted">
-        <view class="agreement-check" :class="{ checked: agreementAccepted }">
-          {{ agreementAccepted ? '✓' : '' }}
-        </view>
-        <text>我已阅读并同意《服务协议》和《隐私政策》</text>
-      </label>
-      <view class="auth-note"
-        ><text>i</text>验证环境使用 Mock 微信登录；令牌按平台安全策略保存</view
-      >
-    </view>
-  </view>
+  <LoginView v-if="!appReady" @authenticated="onAuthenticated" />
 
   <view v-else class="app-shell">
     <view class="topbar">
@@ -544,20 +633,24 @@ async function openHistory(): Promise<void> {
       >
         {{ activeTab === 'plans' ? '‹' : '☰' }}
       </button>
-      <view class="topbar-title">
-        <text class="page-title">{{
-          activeTab === 'plans' ? '计划' : activeConversation?.title
-        }}</text>
-        <text class="page-subtitle">
-          {{
-            activeTab === 'plans'
-              ? '目标、任务与进度'
-              : activeAgent
-                ? `${activeAgent.name}助理在线`
-                : 'AI 管家在线'
-          }}
-        </text>
+      <view v-if="activeTab === 'plans'" class="topbar-title">
+        <text class="page-title">计划</text>
+        <text class="page-subtitle">目标、任务与进度</text>
       </view>
+      <button
+        v-else
+        class="topbar-title assistant-switch-trigger"
+        aria-label="切换 AI 管家或专业助理"
+        :aria-expanded="activeSheet === 'assistants'"
+        @click="activeSheet = 'assistants'"
+      >
+        <view class="assistant-title-row">
+          <text class="assistant-title-icon">{{ activeAgent?.icon ?? '✦' }}</text>
+          <text class="page-title">{{ activeAgent ? `${activeAgent.name}助理` : 'AI 管家' }}</text>
+          <text class="assistant-chevron">⌄</text>
+        </view>
+        <text class="page-subtitle">{{ activeAssistantSubtitle }}</text>
+      </button>
       <view class="topbar-actions">
         <button
           class="topbar-icon"
@@ -607,10 +700,70 @@ async function openHistory(): Promise<void> {
       :conversations="conversations"
       :agent-shortcuts="agentShortcuts"
       @close="conversationDrawerOpen = false"
-      @create="createConversation"
       @select="selectConversation"
+      @delete="deleteConversation"
       @open-materials="openMaterials"
     />
+
+    <AppSheet
+      :open="activeSheet === 'assistants'"
+      eyebrow="当前场景"
+      title="切换助理"
+      @close="activeSheet = null"
+    >
+      <view class="assistant-picker">
+        <text class="assistant-group-label">通用</text>
+        <button
+          class="assistant-option"
+          :class="{ current: isAssistantCurrent(null) }"
+          :aria-pressed="isAssistantCurrent(null)"
+          @click="selectAssistant(null)"
+        >
+          <text class="assistant-option-icon general">✦</text>
+          <view class="assistant-option-copy">
+            <text class="assistant-option-name">AI 管家</text>
+            <text class="assistant-option-description">处理日常问题、资料和跨领域计划</text>
+          </view>
+          <text v-if="isAssistantCurrent(null)" class="assistant-option-state current">当前</text>
+          <text v-else-if="assistantStatus(null)" class="assistant-option-state pending">{{
+            assistantStatus(null)
+          }}</text>
+          <text v-else class="assistant-option-arrow">›</text>
+        </button>
+
+        <text class="assistant-group-label specialists">专业助理</text>
+        <button
+          v-for="agent in agentShortcuts"
+          :key="agent.code"
+          class="assistant-option"
+          :class="{
+            current: isAssistantCurrent(agent.code),
+            unavailable: agent.availability === 'COMING_SOON',
+          }"
+          :disabled="agent.availability === 'COMING_SOON'"
+          :aria-pressed="isAssistantCurrent(agent.code)"
+          @click="selectAssistant(agent.code)"
+        >
+          <text class="assistant-option-icon">{{ agent.icon }}</text>
+          <view class="assistant-option-copy">
+            <text class="assistant-option-name">{{ agent.name }}助理</text>
+            <text class="assistant-option-description">{{ agent.description }}</text>
+          </view>
+          <text v-if="isAssistantCurrent(agent.code)" class="assistant-option-state current"
+            >当前</text
+          >
+          <text
+            v-else-if="agent.availability === 'COMING_SOON'"
+            class="assistant-option-state unavailable"
+            >即将开放</text
+          >
+          <text v-else-if="assistantStatus(agent.code)" class="assistant-option-state pending">{{
+            assistantStatus(agent.code)
+          }}</text>
+          <text v-else class="assistant-option-arrow">›</text>
+        </button>
+      </view>
+    </AppSheet>
 
     <AppSheet
       :open="activeSheet === 'attachments'"
@@ -999,6 +1152,55 @@ async function openHistory(): Promise<void> {
   gap: 3rpx;
 }
 
+.assistant-switch-trigger {
+  align-items: flex-start;
+  justify-content: center;
+  min-height: 72rpx;
+  margin: 0;
+  padding: 0 8rpx;
+  line-height: 1.2;
+  text-align: left;
+  background: transparent;
+  border: 0;
+  border-radius: 18rpx;
+}
+
+.assistant-switch-trigger:active {
+  background: rgba(101, 86, 232, 0.08);
+}
+
+.assistant-switch-trigger::after {
+  border: 0;
+}
+
+.assistant-title-row {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8rpx;
+}
+
+.assistant-title-icon {
+  display: flex;
+  flex: 0 0 auto;
+  width: 34rpx;
+  height: 34rpx;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  font-size: 18rpx;
+  font-weight: 800;
+  background: linear-gradient(145deg, #6d5be5, #9d91f8);
+  border-radius: 11rpx;
+}
+
+.assistant-chevron {
+  flex: 0 0 auto;
+  color: #817b94;
+  font-size: 23rpx;
+  transform: translateY(-2rpx);
+}
+
 .page-title {
   overflow: hidden;
   color: #29263b;
@@ -1063,9 +1265,124 @@ async function openHistory(): Promise<void> {
 .topbar-icon::after,
 .tab-button::after,
 .attachment-grid button::after,
+.assistant-option::after,
 .sheet-primary::after,
 .danger-zone button::after {
   border: 0;
+}
+
+.assistant-picker {
+  display: flex;
+  margin-top: 28rpx;
+  flex-direction: column;
+}
+
+.assistant-group-label {
+  margin: 0 5rpx 10rpx;
+  color: #918ca1;
+  font-size: 18rpx;
+  font-weight: 700;
+}
+
+.assistant-group-label.specialists {
+  margin-top: 26rpx;
+}
+
+.assistant-option {
+  display: flex;
+  min-height: 108rpx;
+  align-items: center;
+  gap: 18rpx;
+  margin: 0 0 12rpx;
+  padding: 17rpx 18rpx;
+  color: #302d42;
+  line-height: 1.25;
+  text-align: left;
+  background: #f7f6fc;
+  border: 1px solid #ebe8f4;
+  border-radius: 25rpx;
+}
+
+.assistant-option.current {
+  background: #efecff;
+  border-color: #c8bfff;
+}
+
+.assistant-option.unavailable {
+  opacity: 0.62;
+}
+
+.assistant-option-icon {
+  display: flex;
+  flex: 0 0 auto;
+  width: 68rpx;
+  height: 68rpx;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  font-size: 28rpx;
+  font-weight: 800;
+  background: linear-gradient(145deg, #7666ed, #a79cf8);
+  border-radius: 22rpx;
+  box-shadow: 0 8rpx 20rpx rgba(86, 67, 190, 0.16);
+}
+
+.assistant-option-icon.general {
+  background: linear-gradient(145deg, #4e68dc, #8498f4);
+}
+
+.assistant-option-copy {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 7rpx;
+}
+
+.assistant-option-name {
+  overflow: hidden;
+  color: #302d42;
+  font-size: 23rpx;
+  font-weight: 750;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.assistant-option-description {
+  overflow: hidden;
+  color: #898498;
+  font-size: 18rpx;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.assistant-option-state {
+  flex: 0 0 auto;
+  padding: 8rpx 12rpx;
+  font-size: 16rpx;
+  font-weight: 700;
+  border-radius: 999rpx;
+}
+
+.assistant-option-state.current {
+  color: #5d4fd5;
+  background: #ded8ff;
+}
+
+.assistant-option-state.pending {
+  color: #9a651e;
+  background: #fff0d8;
+}
+
+.assistant-option-state.unavailable {
+  color: #777284;
+  background: #ebe9ef;
+}
+
+.assistant-option-arrow {
+  flex: 0 0 auto;
+  color: #aaa5b6;
+  font-size: 34rpx;
 }
 
 .main-view {

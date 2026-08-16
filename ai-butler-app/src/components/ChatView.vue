@@ -103,19 +103,41 @@ function usePrompt(prompt: string): void {
         <text class="welcome-copy">{{
           activeAgent?.welcomeMessage ?? '可以聊生活，也可以让我帮你推进计划'
         }}</text>
-        <view class="quick-prompts">
-          <button
-            v-for="prompt in quickPrompts"
-            :key="prompt.title"
-            @click="usePrompt(prompt.prompt)"
-          >
-            <text class="prompt-icon">{{ prompt.icon }}</text>
-            <text>{{ prompt.title }}</text>
-          </button>
-        </view>
       </view>
 
-      <view v-else class="conversation-date">今天</view>
+      <scroll-view
+        v-if="isFreshConversation && !activeAgent"
+        class="agent-shortcut-scroll"
+        scroll-x
+        :show-scrollbar="false"
+      >
+        <view class="agent-shortcut-row">
+          <button
+            v-for="agent in agentShortcuts"
+            :key="agent.code"
+            class="agent-shortcut"
+            :class="{
+              current: agent.code === activeAgentCode,
+              coming: agent.availability === 'COMING_SOON',
+            }"
+            @click="emit('selectAgent', agent.code)"
+          >
+            <text class="agent-icon">{{ agent.icon }}</text>
+            <view class="agent-copy">
+              <view class="agent-heading">
+                <text class="agent-name">{{ agent.name }}</text>
+                <text v-if="agent.code === activeAgentCode" class="agent-state current">当前</text>
+                <text v-else-if="agent.availability === 'COMING_SOON'" class="agent-state"
+                  >即将开放</text
+                >
+              </view>
+              <text class="agent-description">{{ agent.description }}</text>
+            </view>
+          </button>
+        </view>
+      </scroll-view>
+
+      <view v-if="!isFreshConversation" class="conversation-date">今天</view>
 
       <view class="chat-thread" :class="{ fresh: isFreshConversation }">
         <template v-for="item in items" :key="item.key">
@@ -249,32 +271,16 @@ function usePrompt(prompt: string): void {
     </scroll-view>
 
     <view class="composer-area">
-      <scroll-view class="agent-shortcut-scroll" scroll-x :show-scrollbar="false">
-        <view class="agent-shortcut-row">
-          <button
-            v-for="agent in agentShortcuts"
-            :key="agent.code"
-            class="agent-shortcut"
-            :class="{
-              current: agent.code === activeAgentCode,
-              coming: agent.availability === 'COMING_SOON',
-            }"
-            @click="emit('selectAgent', agent.code)"
-          >
-            <text class="agent-icon">{{ agent.icon }}</text>
-            <view class="agent-copy">
-              <view class="agent-heading">
-                <text class="agent-name">{{ agent.name }}</text>
-                <text v-if="agent.code === activeAgentCode" class="agent-state current">当前</text>
-                <text v-else-if="agent.availability === 'COMING_SOON'" class="agent-state"
-                  >即将开放</text
-                >
-              </view>
-              <text class="agent-description">{{ agent.description }}</text>
-            </view>
-          </button>
-        </view>
-      </scroll-view>
+      <view class="quick-prompts">
+        <button
+          v-for="prompt in quickPrompts"
+          :key="prompt.title"
+          @click="usePrompt(prompt.prompt)"
+        >
+          <text class="prompt-icon">{{ prompt.icon }}</text>
+          <text>{{ prompt.title }}</text>
+        </button>
+      </view>
       <view class="composer-shell">
         <button
           class="voice-button"
@@ -385,12 +391,12 @@ function usePrompt(prompt: string): void {
   width: 100%;
   grid-template-columns: repeat(3, 1fr);
   gap: 14rpx;
-  margin-top: 52rpx;
+  margin-bottom: 12rpx;
 }
 
 .quick-prompts button {
   display: flex;
-  min-height: 112rpx;
+  min-height: 88rpx;
   align-items: center;
   justify-content: center;
   gap: 10rpx;
@@ -725,8 +731,11 @@ function usePrompt(prompt: string): void {
 
 .agent-shortcut-scroll {
   width: 100%;
-  margin-bottom: 12rpx;
   white-space: nowrap;
+}
+
+.welcome-stage .agent-shortcut-scroll {
+  margin-top: 52rpx;
 }
 
 .agent-shortcut-row {

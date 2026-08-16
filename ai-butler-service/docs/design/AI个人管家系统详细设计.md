@@ -121,7 +121,7 @@ PostgreSQL  LangGraph              Qdrant       对象存储
 
 职责：
 
-- 微信登录码服务端交换、访问令牌签发和刷新
+- H5 手机号登录、可配置短信验证、微信登录码与授权手机号交换、访问令牌签发和刷新
 - 用户状态、画像、学习时间和通知偏好管理
 - 账号停用与数据删除申请
 
@@ -131,14 +131,14 @@ PostgreSQL  LangGraph              Qdrant       对象存储
 - 日志中对令牌、手机号、邮箱和用户原文进行脱敏。
 - 停用用户不能创建新会话或恢复 Agent run。
 
-### 5.2 Single Chat / Context Archive
+### 5.2 Automatic Conversation / Context Archive
 
 职责：
 
-- 为每个用户幂等提供一个永久主聊天，不提供新建、切换、归档或恢复会话
+- 提供单一聊天入口；不提供手动新建，由消息入口自动延续、恢复或归档并创建场景
 - 保存用户消息、Assistant 占位消息、最终内容和结构化卡片
 - 将主聊天拆为内部 `conversation_segments`；每个分段映射一个不可变 LangGraph `thread_id`
-- 处理客户端重复提交、会话内运行互斥和输入中断恢复
+- 处理用户级消息幂等、执行槽互斥和跨会话输入中断恢复
 - 为客户端提供可续传的聊天事件流
 - 依据模型 Token 预算在 70% 软阈值预生成摘要，在 85% 硬阈值归档分段并轮换线程
 - 从累计交接摘要、最近消息、长期记忆和最新业务事实分层构建节点级上下文
@@ -146,7 +146,7 @@ PostgreSQL  LangGraph              Qdrant       对象存储
 规则：
 
 - 客户端为每条消息生成 `client_message_id`。
-- `(conversation_id, client_message_id)` 唯一；规范化请求 hash 相同则返回原 `run_id`，相同 ID 的不同内容返回 `409 IDEMPOTENCY_KEY_REUSED`。
+- `(user_id, client_message_id)` 唯一；规范化请求 hash 相同则返回原会话和 `run_id`，相同 ID 的不同内容返回 `409 IDEMPOTENCY_KEY_REUSED`。
 - 一个 conversation 同时最多有一个非终态 run。
 - 一个 run 可以因输入或审批中断跨越多轮 User/Assistant 消息，不能假设一对一。
 - SSE 连接断开不取消 run；取消和重试必须调用显式接口。
@@ -295,7 +295,10 @@ REJECT  → 保留历史 → run 正常结束，不创建任务
 
 | 方法 | 路径 | 用途 |
 | --- | --- | --- |
-| `POST` | `/v1/auth/wechat/login` | 使用微信登录码换取访问令牌 |
+| `GET` | `/v1/auth/config` | 获取公开登录能力配置 |
+| `POST` | `/v1/auth/phone/verification-codes` | 发送手机号登录验证码 |
+| `POST` | `/v1/auth/phone/login` | 使用唯一手机号登录 |
+| `POST` | `/v1/auth/wechat/login` | 使用微信登录码和授权手机号换取访问令牌 |
 | `POST` | `/v1/auth/refresh` | 轮换刷新令牌并签发新访问令牌 |
 | `POST` | `/v1/auth/logout` | 撤销当前刷新会话 |
 | `GET` | `/v1/me` | 获取当前用户 |
@@ -306,13 +309,13 @@ REJECT  → 保留历史 → run 正常结束，不创建任务
 | `POST` | `/v1/user-agents` | 启用一个 Agent |
 | `PATCH` | `/v1/user-agents/{id}` | 暂停、恢复或完成 User Agent |
 
-### 7.2 单聊天与运行
+### 7.2 自动会话与运行
 
 | 方法 | 路径 | 用途 |
 | --- | --- | --- |
-| `GET` | `/v1/chat` | 获取或幂等创建当前用户唯一主聊天 |
-| `GET` | `/v1/chat/messages` | 跨内部 segment 分页获取全部可展示消息 |
-| `POST` | `/v1/chat/messages` | 向当前 ACTIVE segment 创建用户消息并启动 run |
+| `GET` | `/v1/conversations` | 获取非空当前话题和历史话题 |
+| `GET` | `/v1/conversations/{id}/messages` | 跨内部 segment 分页获取可展示消息 |
+| `POST` | `/v1/messages` | 自动决定真实会话，创建用户消息并启动或恢复 run |
 | `GET` | `/v1/agent-runs/{run_id}` | 获取运行结果、进度或待办动作 |
 | `POST` | `/v1/agent-runs/{run_id}/stream-ticket` | 获取短期、仅限本 run 的流票据 |
 | `GET` | `/v1/agent-runs/{run_id}/events` | 通过 SSE 获取和续传展示事件 |
@@ -320,7 +323,7 @@ REJECT  → 保留历史 → run 正常结束，不创建任务
 | `POST` | `/v1/agent-runs/{run_id}/retry` | 从同一 checkpoint 重试可重试失败 |
 | `POST` | `/v1/approvals/{approval_id}/decisions` | 批准、编辑或拒绝待确认内容 |
 
-客户端不传 `conversation_id` 或 `segment_id`；服务端从认证用户解析唯一主聊天和 ACTIVE segment。归档事务已创建新 ACTIVE segment 但交接摘要尚未发布时，消息和 run 仍可入库，Worker 等待前序分段完成交接后再执行。
+客户端不传 `segment_id`。普通输入由服务端自动路由；历史续聊可传 `target_conversation_id`，专业入口可传 `specialist_code`。客户端必须以响应中的实际 `conversation_id` 建立消息流。
 
 消息请求：
 

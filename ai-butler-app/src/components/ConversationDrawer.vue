@@ -13,8 +13,8 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   close: []
-  create: []
   select: [conversationKey: string]
+  delete: [conversationKey: string]
   openMaterials: []
 }>()
 
@@ -55,45 +55,48 @@ function agentFor(conversation: ConversationViewModel): AgentShortcutViewModel |
         <button class="close-button" aria-label="关闭会话列表" @click="emit('close')">×</button>
       </view>
 
-      <button class="new-chat-button" @click="emit('create')">
-        <text class="new-chat-icon">＋</text>
-        <view>
-          <text>开启新对话</text>
-          <text>当前对话将自动归档</text>
-        </view>
-      </button>
-
       <scroll-view class="conversation-scroll" scroll-y>
         <view v-for="section in sections" :key="section.key" class="conversation-section">
           <text v-if="section.items.length" class="section-label">{{ section.label }}</text>
-          <button
+          <view
             v-for="conversation in section.items"
             :key="conversation.key"
             class="conversation-row"
             :class="{ active: conversation.key === activeKey }"
-            @click="emit('select', conversation.key)"
           >
-            <text v-if="agentFor(conversation)" class="conversation-agent-icon">
-              {{ agentFor(conversation)?.icon }}
-            </text>
-            <view class="conversation-copy">
-              <view class="conversation-title-row">
-                <text class="conversation-title">{{ conversation.title }}</text>
-                <text v-if="agentFor(conversation)" class="agent-label">
-                  {{ agentFor(conversation)?.name }}
-                </text>
-                <text v-if="conversation.archived" class="archive-dot">已归档</text>
+            <button class="conversation-select" @click="emit('select', conversation.key)">
+              <text v-if="agentFor(conversation)" class="conversation-agent-icon">
+                {{ agentFor(conversation)?.icon }}
+              </text>
+              <view class="conversation-copy">
+                <view class="conversation-title-row">
+                  <text class="conversation-title">{{ conversation.title }}</text>
+                  <text v-if="agentFor(conversation)" class="agent-label">
+                    {{ agentFor(conversation)?.name }}
+                  </text>
+                  <text class="status-label" :class="conversation.statusLabel">
+                    {{ conversation.statusLabel }}
+                  </text>
+                </view>
+                <text class="conversation-preview">{{ conversation.preview }}</text>
               </view>
-              <text class="conversation-preview">{{ conversation.preview }}</text>
-            </view>
-            <text class="conversation-time">{{ conversation.timeLabel }}</text>
-          </button>
+              <text class="conversation-time">{{ conversation.timeLabel }}</text>
+            </button>
+            <button
+              v-if="conversation.archived"
+              class="conversation-delete"
+              :aria-label="`删除历史对话：${conversation.title}`"
+              @click.stop="emit('delete', conversation.key)"
+            >
+              ×
+            </button>
+          </view>
         </view>
       </scroll-view>
 
       <view class="drawer-footer">
         <button @click="emit('openMaterials')"><text>▣</text>我的资料</button>
-        <view class="archive-note"><text>✓</text>对话会在开启新话题后自动归档</view>
+        <view class="archive-note"><text>✓</text>系统会按话题自动整理，空白页不计入历史</view>
       </view>
     </view>
   </view>
@@ -155,7 +158,6 @@ function agentFor(conversation: ConversationViewModel): AgentShortcutViewModel |
 }
 
 .profile-copy,
-.new-chat-button > view,
 .conversation-copy {
   display: flex;
   min-width: 0;
@@ -188,44 +190,6 @@ function agentFor(conversation: ConversationViewModel): AgentShortcutViewModel |
   border-radius: 19rpx;
 }
 
-.new-chat-button {
-  display: flex;
-  min-height: 104rpx;
-  align-items: center;
-  gap: 18rpx;
-  margin: 0 0 28rpx;
-  padding: 18rpx 22rpx;
-  color: #fff;
-  line-height: 1.25;
-  text-align: left;
-  background: linear-gradient(135deg, #6556e8, #8a79f6);
-  border: 0;
-  border-radius: 28rpx;
-  box-shadow: 0 16rpx 36rpx rgba(96, 76, 220, 0.24);
-}
-
-.new-chat-icon {
-  display: flex;
-  width: 60rpx;
-  height: 60rpx;
-  align-items: center;
-  justify-content: center;
-  font-size: 35rpx;
-  background: rgba(255, 255, 255, 0.17);
-  border-radius: 20rpx;
-}
-
-.new-chat-button view text:first-child {
-  font-size: 25rpx;
-  font-weight: 750;
-}
-
-.new-chat-button view text:last-child {
-  margin-top: 7rpx;
-  color: rgba(255, 255, 255, 0.72);
-  font-size: 18rpx;
-}
-
 .conversation-scroll {
   min-height: 0;
   flex: 1;
@@ -247,15 +211,25 @@ function agentFor(conversation: ConversationViewModel): AgentShortcutViewModel |
   display: flex;
   width: 100%;
   min-height: 100rpx;
+  align-items: center;
+  margin: 0 0 6rpx;
+  background: transparent;
+  border-radius: 24rpx;
+}
+
+.conversation-select {
+  display: flex;
+  min-width: 0;
+  min-height: 100rpx;
   align-items: flex-start;
   gap: 10rpx;
-  margin: 0 0 6rpx;
-  padding: 18rpx 16rpx;
+  margin: 0;
+  padding: 18rpx 10rpx 18rpx 16rpx;
   line-height: 1.25;
   text-align: left;
   background: transparent;
   border: 0;
-  border-radius: 24rpx;
+  flex: 1;
 }
 
 .conversation-agent-icon {
@@ -276,6 +250,20 @@ function agentFor(conversation: ConversationViewModel): AgentShortcutViewModel |
   background: #eae8ff;
 }
 
+.conversation-delete {
+  flex: 0 0 auto;
+  width: 58rpx;
+  height: 58rpx;
+  margin: 0 10rpx 0 0;
+  padding: 0;
+  color: #9a7380;
+  font-size: 34rpx;
+  line-height: 56rpx;
+  background: rgba(255, 255, 255, 0.72);
+  border: 0;
+  border-radius: 18rpx;
+}
+
 .conversation-title-row {
   display: flex;
   min-width: 0;
@@ -292,13 +280,25 @@ function agentFor(conversation: ConversationViewModel): AgentShortcutViewModel |
   white-space: nowrap;
 }
 
-.archive-dot {
+.status-label {
   flex: 0 0 auto;
   padding: 5rpx 8rpx;
   color: #77718d;
   font-size: 14rpx;
   background: #e9e7ef;
   border-radius: 8rpx;
+}
+
+.status-label.待回复,
+.status-label.待确认,
+.status-label.待重试 {
+  color: #98611f;
+  background: #fff1d9;
+}
+
+.status-label.处理中 {
+  color: #6556d8;
+  background: #e8e4ff;
 }
 
 .agent-label {

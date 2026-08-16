@@ -5,10 +5,11 @@ const api = vi.hoisted(() => ({
   dashboard: vi.fn(),
   agentDefinitions: vi.fn(),
   conversations: vi.fn(),
-  createConversation: vi.fn(),
+  deleteConversation: vi.fn(),
   messages: vi.fn(),
   sendMessage: vi.fn(),
   run: vi.fn(),
+  cancelRun: vi.fn(),
   approve: vi.fn(),
   streamTicket: vi.fn(),
   executeTask: vi.fn(),
@@ -160,13 +161,16 @@ describe('server-fact butler store', () => {
       ],
     })
     api.conversations.mockReset().mockResolvedValue(conversations)
-    api.createConversation.mockReset().mockResolvedValue(conversations.items[0])
+    api.deleteConversation.mockReset().mockResolvedValue(undefined)
     api.messages.mockReset().mockResolvedValue(messages)
     api.sendMessage.mockReset().mockResolvedValue({
+      conversation_id: 'conversation-1',
+      transition: { kind: 'CONTINUED', archived_conversation_id: null },
       run: { id: 'run-1' },
       stream: { events_url: '/v1/events', ticket: 'ticket', last_sequence: 0 },
     })
     api.run.mockReset().mockResolvedValue({ status: 'SUCCEEDED' })
+    api.cancelRun.mockReset().mockResolvedValue({ status: 'CANCELLED' })
     api.approve.mockReset().mockResolvedValue({ run_id: 'run-2' })
     api.streamTicket.mockReset().mockResolvedValue({
       events_url: '/v1/events-2',
@@ -215,8 +219,9 @@ describe('server-fact butler store', () => {
       'file-1',
     ])
     expect(api.sendMessage).toHaveBeenCalledWith(
-      'conversation-1',
       expect.objectContaining({
+        target_conversation_id: null,
+        context_policy: 'AUTO',
         attachments: [{ file_id: 'file-1', position: 0 }],
         selection: expect.objectContaining({ selected_option_ids: ['six'] }),
       }),
@@ -253,6 +258,267 @@ describe('server-fact butler store', () => {
     await onError()
     expect(api.run).toHaveBeenCalled()
     expect(api.messages).toHaveBeenCalled()
+  })
+
+  it('stages a specialist without creating an empty conversation and switches on first send', async () => {
+    const store = useButlerStore()
+    await store.load('access')
+    await store.sendMessage('开始', 'access')
+    const nextConversation = {
+      ...conversations.items[0],
+      id: 'conversation-2',
+      status: 'CURRENT',
+      specialist: { code: 'CIVIL_SERVICE_EXAM', name: '考公', icon: '公' },
+    }
+    api.sendMessage.mockResolvedValueOnce({
+      conversation_id: 'conversation-2',
+      transition: { kind: 'CREATED', archived_conversation_id: 'conversation-1' },
+      run: { id: 'run-2' },
+      stream: { events_url: '/v1/events-2', ticket: 'ticket-2', last_sequence: 0 },
+    })
+    api.conversations.mockResolvedValue({
+      items: [nextConversation, { ...conversations.items[0], status: 'ARCHIVED' }],
+      next_cursor: null,
+      has_more: false,
+    })
+    api.messages.mockResolvedValueOnce({ items: [], next_cursor: null, has_more: false })
+
+    await expect(store.openSpecialist('CIVIL_SERVICE_EXAM', 'access')).resolves.toBe('WELCOME')
+    expect(store.activeConversationId).toBeNull()
+    expect(store.chatItems).toEqual([])
+    await store.sendMessage('制定备考计划', 'access')
+
+    expect(stream.close).toHaveBeenCalledTimes(1)
+    expect(api.sendMessage).toHaveBeenLastCalledWith(
+      expect.objectContaining({ specialist_code: 'CIVIL_SERVICE_EXAM' }),
+      'access',
+    )
+    expect(store.activeRunId).toBe('run-2')
+    expect(store.activeConversationId).toBe('conversation-2')
+  })
+
+  it('preserves the old stream when a staged specialist message fails', async () => {
+    const store = useButlerStore()
+    await store.load('access')
+    await store.sendMessage('开始', 'access')
+    await store.openSpecialist('CIVIL_SERVICE_EXAM', 'access')
+    api.sendMessage.mockRejectedValueOnce(new Error('offline'))
+
+    await expect(store.sendMessage('制定计划', 'access')).rejects.toThrow('offline')
+
+    expect(stream.close).not.toHaveBeenCalled()
+    expect(store.activeRunId).toBe('run-1')
+    expect(store.activeConversationId).toBeNull()
+    expect(store.stagedSpecialistCode).toBe('CIVIL_SERVICE_EXAM')
+  })
+
+  it('falls back to the current conversation after deleting the viewed history', async () => {
+    const current = conversations.items[0]
+    const archived = {
+      ...current,
+      id: 'conversation-history',
+      title: '历史对话',
+      status: 'ARCHIVED',
+    }
+    api.conversations.mockResolvedValueOnce({
+      items: [current, archived],
+      next_cursor: null,
+      has_more: false,
+    })
+    const store = useButlerStore()
+    await store.load('access')
+    await store.loadConversation('conversation-history', 'access')
+    api.conversations.mockResolvedValueOnce({
+      items: [current],
+      next_cursor: null,
+      has_more: false,
+    })
+
+    await store.deleteConversation('conversation-history', 'access')
+
+    expect(api.deleteConversation).toHaveBeenCalledWith('conversation-history', 'access')
+    expect(store.activeConversationId).toBe('conversation-1')
+    expect(store.conversations).toHaveLength(1)
+  })
+
+  it('maps workflow labels and resumes the latest suspended specialist', async () => {
+    const current = conversations.items[0]
+    const specialist = {
+      ...current,
+      id: 'conversation-specialist',
+      status: 'ARCHIVED',
+      specialist: { code: 'CIVIL_SERVICE_EXAM', name: '考公', icon: '公' },
+      active_run: { id: 'run-waiting', status: 'AWAITING_INPUT' },
+    }
+    api.conversations.mockResolvedValueOnce({
+      items: [current, specialist],
+      next_cursor: null,
+      has_more: false,
+    })
+    const store = useButlerStore()
+    await store.load('access')
+
+    expect(store.conversations.map((item) => item.statusLabel)).toEqual(['已完成', '待回复'])
+    await expect(store.openSpecialist('CIVIL_SERVICE_EXAM', 'access')).resolves.toBe('RESUMABLE')
+    expect(store.activeConversationId).toBe('conversation-specialist')
+
+    api.sendMessage.mockResolvedValueOnce({
+      conversation_id: 'conversation-specialist',
+      transition: { kind: 'RESUMED', archived_conversation_id: 'conversation-1' },
+      run: { id: 'run-waiting' },
+      stream: { events_url: '/v1/events', ticket: 'ticket', last_sequence: 4 },
+    })
+    await store.sendMessage('继续', 'access')
+    expect(api.sendMessage).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        target_conversation_id: 'conversation-specialist',
+        context_policy: 'CONTINUE_CURRENT',
+      }),
+      'access',
+    )
+  })
+
+  it('cancels a running current task when entering another specialist welcome state', async () => {
+    const running = {
+      ...conversations.items[0],
+      active_run: { id: 'run-current', status: 'RUNNING' },
+    }
+    api.conversations.mockResolvedValueOnce({
+      items: [running],
+      next_cursor: null,
+      has_more: false,
+    })
+    const store = useButlerStore()
+    await store.load('access')
+
+    await expect(store.openSpecialist('CIVIL_SERVICE_EXAM', 'access')).resolves.toBe('WELCOME')
+    expect(api.cancelRun).toHaveBeenCalledWith('run-current', 'access')
+    expect(store.stagedSpecialistCode).toBe('CIVIL_SERVICE_EXAM')
+  })
+
+  it('requires confirmation before cancelling an executing scene switch', async () => {
+    const running = {
+      ...conversations.items[0],
+      active_run: { id: 'run-current', status: 'RUNNING' },
+    }
+    api.conversations.mockResolvedValueOnce({
+      items: [running],
+      next_cursor: null,
+      has_more: false,
+    })
+    const store = useButlerStore()
+    await store.load('access')
+
+    await expect(
+      store.switchAssistantScene(
+        { kind: 'SPECIALIST', specialistCode: 'CIVIL_SERVICE_EXAM' },
+        'access',
+      ),
+    ).resolves.toBe('CONFIRMATION_REQUIRED')
+    expect(api.cancelRun).not.toHaveBeenCalled()
+    expect(store.activeConversationId).toBe('conversation-1')
+
+    await expect(
+      store.switchAssistantScene(
+        { kind: 'SPECIALIST', specialistCode: 'CIVIL_SERVICE_EXAM' },
+        'access',
+        { cancelExecuting: true },
+      ),
+    ).resolves.toBe('WELCOME')
+    expect(api.cancelRun).toHaveBeenCalledWith('run-current', 'access')
+    expect(store.activeConversationId).toBeNull()
+    expect(store.stagedScene).toEqual({
+      kind: 'SPECIALIST',
+      specialistCode: 'CIVIL_SERVICE_EXAM',
+    })
+  })
+
+  it('stages the general butler and forces its first message into a new scene', async () => {
+    const specialist = {
+      ...conversations.items[0],
+      specialist: { code: 'CIVIL_SERVICE_EXAM', name: '考公', icon: '公' },
+    }
+    api.conversations.mockResolvedValueOnce({
+      items: [specialist],
+      next_cursor: null,
+      has_more: false,
+    })
+    const store = useButlerStore()
+    await store.load('access')
+
+    await expect(store.switchAssistantScene({ kind: 'GENERAL' }, 'access')).resolves.toBe('WELCOME')
+    expect(store.activeConversationId).toBeNull()
+    expect(store.stagedScene).toEqual({ kind: 'GENERAL' })
+
+    api.sendMessage.mockResolvedValueOnce({
+      conversation_id: 'conversation-general',
+      transition: { kind: 'CREATED', archived_conversation_id: 'conversation-1' },
+      run: { id: 'run-general' },
+      stream: { events_url: '/v1/events', ticket: 'ticket', last_sequence: 0 },
+    })
+    await store.sendMessage('聊聊日常安排', 'access')
+
+    expect(api.sendMessage).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        specialist_code: null,
+        target_conversation_id: null,
+        context_policy: 'ARCHIVE_AND_START',
+      }),
+      'access',
+    )
+    expect(store.stagedScene).toBeNull()
+  })
+
+  it('resumes the latest suspended general butler conversation', async () => {
+    const specialist = {
+      ...conversations.items[0],
+      specialist: { code: 'CIVIL_SERVICE_EXAM', name: '考公', icon: '公' },
+    }
+    const suspendedGeneral = {
+      ...conversations.items[0],
+      id: 'conversation-general-waiting',
+      status: 'ARCHIVED',
+      active_run: { id: 'run-general-waiting', status: 'AWAITING_APPROVAL' },
+    }
+    api.conversations.mockResolvedValueOnce({
+      items: [specialist, suspendedGeneral],
+      next_cursor: null,
+      has_more: false,
+    })
+    const store = useButlerStore()
+    await store.load('access')
+
+    await expect(store.switchAssistantScene({ kind: 'GENERAL' }, 'access')).resolves.toBe(
+      'RESUMABLE',
+    )
+    expect(store.activeConversationId).toBe('conversation-general-waiting')
+    expect(store.stagedScene).toBeNull()
+  })
+
+  it('recognizes an already active specialist and exposes all workflow status labels', async () => {
+    const statusCases = [
+      ['AWAITING_APPROVAL', '待确认'],
+      ['FAILED_RETRYABLE', '待重试'],
+      ['QUEUED', '处理中'],
+    ] as const
+    api.conversations.mockResolvedValueOnce({
+      items: statusCases.map(([status], index) => ({
+        ...conversations.items[0],
+        id: `conversation-${index}`,
+        status: index === 0 ? 'CURRENT' : 'ARCHIVED',
+        specialist: { code: 'CIVIL_SERVICE_EXAM', name: '考公', icon: '公' },
+        active_run: { id: `run-${index}`, status },
+      })),
+      next_cursor: null,
+      has_more: false,
+    })
+    const store = useButlerStore()
+    await store.load('access')
+
+    expect(store.conversations.map((item) => item.statusLabel)).toEqual(
+      statusCases.map(([, label]) => label),
+    )
+    await expect(store.openSpecialist('CIVIL_SERVICE_EXAM', 'access')).resolves.toBe('CURRENT')
   })
 
   it('approves plans, completes tasks, and resets state', async () => {

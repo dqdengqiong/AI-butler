@@ -29,6 +29,17 @@ class _WechatClient:
     async def get(self, *_args: object, **_kwargs: object) -> httpx.Response:
         return httpx.Response(200, json=self.payload, request=httpx.Request("GET", "https://wx"))
 
+    async def post(self, *_args: object, **_kwargs: object) -> httpx.Response:
+        return httpx.Response(200, json=self.payload, request=httpx.Request("POST", "https://wx"))
+
+
+class _FailingWechatClient(_WechatClient):
+    async def get(self, *_args: object, **_kwargs: object) -> httpx.Response:
+        return httpx.Response(
+            502,
+            request=httpx.Request("GET", "https://wx/?secret=must-not-escape"),
+        )
+
 
 async def test_wechat_code_exchange_and_invalid_payload(monkeypatch: pytest.MonkeyPatch) -> None:
     with pytest.raises(ValueError, match="credentials"):
@@ -39,6 +50,37 @@ async def test_wechat_code_exchange_and_invalid_payload(monkeypatch: pytest.Monk
     monkeypatch.setattr(httpx, "AsyncClient", lambda **_kwargs: _WechatClient({"errcode": 1}))
     with pytest.raises(ValueError, match="exchange failed"):
         await WechatCodeAuthProvider("app", "secret").exchange("bad")
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **_kwargs: _FailingWechatClient({}))
+    with pytest.raises(ValueError, match="exchange failed") as error:
+        await WechatCodeAuthProvider("app", "secret").exchange("secret-login-code")
+    assert error.value.__cause__ is None
+    assert "must-not-escape" not in str(error.value)
+
+
+async def test_wechat_phone_exchange_reuses_application_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    class _Client(_WechatClient):
+        async def post(self, url: str, **_kwargs: object) -> httpx.Response:
+            calls.append(url)
+            payload: dict[str, object]
+            if url.endswith("stable_token"):
+                payload = {"access_token": "upstream-secret-token", "expires_in": 7200}
+            else:
+                payload = {
+                    "errcode": 0,
+                    "phone_info": {"purePhoneNumber": "13800138000"},
+                }
+            return httpx.Response(200, json=payload, request=httpx.Request("POST", url))
+
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **_kwargs: _Client({}))
+    provider = WechatCodeAuthProvider("app", "secret")
+    assert await provider.exchange_phone("phone-code-1") == "13800138000"
+    assert await provider.exchange_phone("phone-code-2") == "13800138000"
+    assert sum(url.endswith("stable_token") for url in calls) == 1
+    assert sum(url.endswith("getuserphonenumber") for url in calls) == 2
 
 
 class _OpenAIClient:

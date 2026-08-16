@@ -7,10 +7,12 @@ import {
   type ApiObject,
   type ConversationResponse,
   type MessageResponse,
+  type SendMessageResponse,
 } from '@/api/butler'
 import { ApiError } from '@/api/client'
 import { connectRunStream, type RunStreamEvent } from '@/stream/transport'
 import type {
+  AgentShortcutCode,
   AgentShortcutViewModel,
   ChatItem,
   ConversationViewModel,
@@ -172,14 +174,6 @@ function mapMessage(value: ApiObject): ChatItem[] {
   return [message, ...(cards as ChatItem[])]
 }
 
-function uuidV4(): string {
-  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (character) => {
-    const random = Math.floor(Math.random() * 16)
-    const value = character === 'x' ? random : (random & 0x3) | 0x8
-    return value.toString(16)
-  })
-}
-
 function mapAgentDefinition(value: AgentDefinitionResponse): AgentShortcutViewModel {
   return {
     code: value.code,
@@ -212,6 +206,17 @@ function conversationTime(
 }
 
 function mapConversation(value: ConversationResponse): ConversationViewModel {
+  const runStatus = value.active_run?.status
+  const statusLabel =
+    runStatus === 'AWAITING_INPUT'
+      ? '待回复'
+      : runStatus === 'AWAITING_APPROVAL'
+        ? '待确认'
+        : runStatus === 'FAILED_RETRYABLE'
+          ? '待重试'
+          : runStatus && ['QUEUED', 'RUNNING', 'CANCEL_REQUESTED'].includes(runStatus)
+            ? '处理中'
+            : '已完成'
   return {
     key: value.id,
     title: value.title,
@@ -219,7 +224,43 @@ function mapConversation(value: ConversationResponse): ConversationViewModel {
     ...conversationTime(value.last_message_at || value.updated_at),
     archived: value.status === 'ARCHIVED',
     agentCode: value.specialist?.code,
+    runId: value.active_run?.id,
+    runStatus,
+    statusLabel,
   }
+}
+
+export interface SendMessageOptions {
+  clientMessageId?: string
+  contextPolicy?: 'AUTO' | 'CONTINUE_CURRENT' | 'ARCHIVE_AND_START'
+  executionPolicy?: 'REJECT' | 'CANCEL_OTHER'
+}
+
+export type AssistantSceneTarget =
+  { kind: 'GENERAL' } | { kind: 'SPECIALIST'; specialistCode: AgentShortcutCode }
+
+export type AssistantSceneTransition = 'CURRENT' | 'RESUMABLE' | 'WELCOME' | 'CONFIRMATION_REQUIRED'
+
+type StagedAssistantScene = AssistantSceneTarget | null
+
+const executingRunStatuses = ['QUEUED', 'RUNNING', 'CANCEL_REQUESTED']
+const suspendedRunStatuses = ['AWAITING_INPUT', 'AWAITING_APPROVAL', 'FAILED_RETRYABLE']
+
+function conversationMatchesScene(
+  conversation: ConversationViewModel,
+  target: AssistantSceneTarget,
+): boolean {
+  return target.kind === 'GENERAL'
+    ? conversation.agentCode === undefined
+    : conversation.agentCode === target.specialistCode
+}
+
+function stagedSceneMatches(staged: StagedAssistantScene, target: AssistantSceneTarget): boolean {
+  if (!staged) return false
+  if (staged.kind === 'GENERAL' || target.kind === 'GENERAL') {
+    return staged.kind === target.kind
+  }
+  return staged.specialistCode === target.specialistCode
 }
 
 /**
@@ -233,6 +274,10 @@ export const useButlerStore = defineStore('butler', () => {
   const agentShortcuts = ref<AgentShortcutViewModel[]>([])
   const conversations = ref<ConversationViewModel[]>([])
   const activeConversationId = ref<string | null>(null)
+  const stagedScene = ref<StagedAssistantScene>(null)
+  const stagedSpecialistCode = computed(() =>
+    stagedScene.value?.kind === 'SPECIALIST' ? stagedScene.value.specialistCode : null,
+  )
   const loading = ref(false)
   const error = ref<string | null>(null)
   const activeRunId = ref<string | null>(null)
@@ -256,6 +301,7 @@ export const useButlerStore = defineStore('butler', () => {
       conversations.value = conversationList.items.map(mapConversation)
       const current = conversationList.items.find((item) => item.status === 'CURRENT')
       activeConversationId.value = current?.id ?? conversationList.items[0]?.id ?? null
+      stagedScene.value = null
       if (activeConversationId.value) await refreshMessages(accessToken)
     } catch (reason) {
       error.value = reason instanceof Error ? reason.message : '加载失败，请重试'
@@ -288,22 +334,78 @@ export const useButlerStore = defineStore('butler', () => {
   }
 
   async function loadConversation(conversationId: string, accessToken: string): Promise<void> {
+    stagedScene.value = null
     activeConversationId.value = conversationId
     chatItems.value = []
     await refreshMessages(accessToken, conversationId)
   }
 
-  async function createConversation(accessToken: string, specialistCode?: string): Promise<void> {
-    const conversation = await butlerApi.createConversation(
-      {
-        schema_version: '1.0',
-        client_conversation_id: uuidV4(),
-        specialist_code: specialistCode ?? null,
-      },
-      accessToken,
+  async function switchAssistantScene(
+    target: AssistantSceneTarget,
+    accessToken: string,
+    options: { cancelExecuting?: boolean } = {},
+  ): Promise<AssistantSceneTransition> {
+    const viewed = conversations.value.find((item) => item.key === activeConversationId.value)
+    if (
+      stagedSceneMatches(stagedScene.value, target) ||
+      (viewed && conversationMatchesScene(viewed, target))
+    ) {
+      return 'CURRENT'
+    }
+
+    const executing = conversations.value.find(
+      (item) => item.runId && executingRunStatuses.includes(item.runStatus ?? ''),
     )
+    if (executing && conversationMatchesScene(executing, target)) {
+      await loadConversation(executing.key, accessToken)
+      return 'RESUMABLE'
+    }
+    if (executing) {
+      if (!options.cancelExecuting) return 'CONFIRMATION_REQUIRED'
+      await butlerApi.cancelRun(executing.runId as string, accessToken)
+      if (activeRunId.value === executing.runId) activeRunId.value = null
+      streamConversationId.value = null
+      streamConnection.value?.close()
+      streamConnection.value = null
+      await refreshConversations(accessToken)
+    }
+
+    const resumable = conversations.value.find(
+      (item) =>
+        conversationMatchesScene(item, target) &&
+        suspendedRunStatuses.includes(item.runStatus ?? ''),
+    )
+    if (resumable) {
+      await loadConversation(resumable.key, accessToken)
+      return 'RESUMABLE'
+    }
+    stagedScene.value = target
+    activeConversationId.value = null
+    chatItems.value = []
+    return 'WELCOME'
+  }
+
+  async function openSpecialist(
+    specialistCode: string,
+    accessToken: string,
+  ): Promise<AssistantSceneTransition> {
+    return switchAssistantScene({ kind: 'SPECIALIST', specialistCode }, accessToken, {
+      cancelExecuting: true,
+    })
+  }
+
+  async function deleteConversation(conversationId: string, accessToken: string): Promise<void> {
+    const deletingActiveView = activeConversationId.value === conversationId
+    await butlerApi.deleteConversation(conversationId, accessToken)
     await refreshConversations(accessToken)
-    await loadConversation(conversation.id, accessToken)
+    if (!deletingActiveView) return
+
+    // 删除正在查看的历史会话后回到服务端唯一 CURRENT 会话。删除接口禁止
+    // CURRENT，因此正常情况下始终能找到回退目标；空值分支用于防御损坏响应。
+    const current = conversations.value.find((item) => !item.archived)
+    activeConversationId.value = current?.key ?? null
+    chatItems.value = []
+    if (current) await refreshMessages(accessToken, current.key)
   }
 
   async function sendMessage(
@@ -311,14 +413,28 @@ export const useButlerStore = defineStore('butler', () => {
     accessToken: string,
     selection?: { cardId: string; optionId: string },
     attachmentFileIds: string[] = [],
-  ): Promise<void> {
+    options: SendMessageOptions = {},
+  ): Promise<SendMessageResponse> {
     const conversationId = activeConversationId.value
-    if (!conversationId) throw new Error('当前没有可发送的对话')
+    const selectedConversation = conversations.value.find((item) => item.key === conversationId)
+    const targetConversationId = selectedConversation?.archived ? conversationId : null
+    const stagedGeneralWelcome = stagedScene.value?.kind === 'GENERAL'
     const response = await butlerApi.sendMessage(
-      conversationId,
       {
         schema_version: '1.0',
-        client_message_id: `message-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+        client_message_id:
+          options.clientMessageId ?? `message-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+        target_conversation_id: targetConversationId,
+        specialist_code:
+          stagedScene.value?.kind === 'SPECIALIST' ? stagedScene.value.specialistCode : null,
+        context_policy:
+          options.contextPolicy ??
+          (targetConversationId
+            ? 'CONTINUE_CURRENT'
+            : stagedGeneralWelcome
+              ? 'ARCHIVE_AND_START'
+              : 'AUTO'),
+        execution_policy: options.executionPolicy ?? 'REJECT',
         content,
         attachments: attachmentFileIds.map((fileId, position) => ({ file_id: fileId, position })),
         selection: selection
@@ -334,20 +450,26 @@ export const useButlerStore = defineStore('butler', () => {
     const run = asObject(response.run)
     const stream = asObject(response.stream)
     if (!run || !stream) throw new Error('无效的运行响应')
+    const actualConversationId = response.conversation_id
+    streamConnection.value?.close()
+    streamConnection.value = null
+    activeConversationId.value = actualConversationId
+    stagedScene.value = null
     activeRunId.value = stringValue(run, 'id')
-    streamConversationId.value = conversationId
+    streamConversationId.value = actualConversationId
     await Promise.all([
-      refreshMessages(accessToken, conversationId),
+      refreshMessages(accessToken, actualConversationId),
       refreshConversations(accessToken),
     ])
     startStream(
       activeRunId.value,
-      conversationId,
+      actualConversationId,
       stringValue(stream, 'events_url'),
       stringValue(stream, 'ticket'),
       numberValue(stream, 'last_sequence'),
       accessToken,
     )
+    return response
   }
 
   function startStream(
@@ -441,6 +563,7 @@ export const useButlerStore = defineStore('butler', () => {
     action: 'APPROVE' | 'EDIT' | 'REJECT',
     accessToken: string,
     feedback?: string,
+    executionPolicy: 'REJECT' | 'CANCEL_OTHER' = 'REJECT',
   ): Promise<void> {
     let response: ApiObject
     try {
@@ -452,6 +575,7 @@ export const useButlerStore = defineStore('butler', () => {
           expected_approval_version: item.approvalVersion,
           action,
           feedback: feedback ?? null,
+          execution_policy: executionPolicy,
         },
         accessToken,
       )
@@ -515,6 +639,7 @@ export const useButlerStore = defineStore('butler', () => {
     agentShortcuts.value = []
     conversations.value = []
     activeConversationId.value = null
+    stagedScene.value = null
     activeRunId.value = null
     streamConversationId.value = null
     error.value = null
@@ -527,12 +652,16 @@ export const useButlerStore = defineStore('butler', () => {
     agentShortcuts,
     conversations,
     activeConversationId,
+    stagedScene,
+    stagedSpecialistCode,
     loading,
     error,
     activeRunId,
     pendingTasks,
     load,
-    createConversation,
+    switchAssistantScene,
+    openSpecialist,
+    deleteConversation,
     loadConversation,
     sendMessage,
     approvePlan,

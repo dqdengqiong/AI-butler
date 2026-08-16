@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url'
 import { spawnSync } from 'node:child_process'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
-const backend = resolve(root, process.env.BACKEND_REPOSITORY ?? '../ai-butler-backend')
+const backend = resolve(root, process.env.BACKEND_REPOSITORY ?? '../ai-butler-service')
 const source = resolve(process.env.BACKEND_OPENAPI_PATH ?? join(backend, 'openapi.json'))
 const generated = join(root, 'src/api/generated/schema.d.ts')
 const lockPath = join(root, 'src/api/generated/contract-lock.json')

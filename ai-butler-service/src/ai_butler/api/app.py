@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from uuid import uuid4
@@ -10,6 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from ai_butler import __version__
+from ai_butler.adapters.auth import MockWechatAuthProvider, WechatCodeAuthProvider
 from ai_butler.api.routers.health import router as health_router
 from ai_butler.api.routers.v1 import router as v1_router
 from ai_butler.application.butler import ButlerService
@@ -23,6 +25,11 @@ def create_app(
     database: Database | None = None,
 ) -> FastAPI:
     resolved_settings = settings or get_settings()
+    if not resolved_settings.sms_verification_enabled:
+        logging.getLogger(__name__).warning(
+            "SMS verification is disabled; phone login accepts a validated "
+            "phone format without a code"
+        )
     resolved_database = database or AsyncDatabase(resolved_settings.app_database_url)
 
     @asynccontextmanager
@@ -39,6 +46,13 @@ def create_app(
     )
     application.state.database = resolved_database
     application.state.settings = resolved_settings
+    application.state.wechat_auth_provider = (
+        MockWechatAuthProvider()
+        if resolved_settings.wechat_auth_mode == "mock"
+        else WechatCodeAuthProvider(
+            resolved_settings.wechat_app_id, resolved_settings.wechat_app_secret
+        )
+    )
     application.state.butler = ButlerService(resolved_database, resolved_settings)  # type: ignore[arg-type]
     application.add_middleware(
         CORSMiddleware,

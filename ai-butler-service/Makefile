@@ -1,6 +1,6 @@
 COMPOSE = docker compose --env-file .env.local -f compose.dev.yml
 
-.PHONY: doctor bootstrap infra-up infra-down infra-up-knowledge stack-up stack-down migrate langgraph-setup seed dev-api dev-worker dev-scheduler openapi format lint typecheck test smoke eval-smoke eval eval-live docs-check secrets ci
+.PHONY: doctor bootstrap infra-up infra-down infra-up-knowledge stack-up stack-down migrate langgraph-setup seed reset-users dev-api dev-worker dev-scheduler openapi format lint typecheck test smoke eval-smoke eval eval-live docs-check secrets ci
 
 doctor:
 	@./scripts/doctor.sh
@@ -36,8 +36,11 @@ langgraph-setup:
 seed:
 	uv run butler-seed
 
+reset-users:
+	uv run butler-reset-users --confirm-delete-all-users
+
 dev-api:
-	uv run fastapi dev
+	uv run butler-api
 
 dev-worker:
 	uv run butler-agent-worker

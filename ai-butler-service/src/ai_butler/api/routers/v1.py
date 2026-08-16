@@ -11,20 +11,22 @@ from uuid import UUID
 from fastapi import APIRouter, Header, Query, Request, Response, status
 from fastapi.responses import StreamingResponse
 
-from ai_butler.adapters.auth import MockWechatAuthProvider, WechatCodeAuthProvider
 from ai_butler.api.dependencies import Butler, CurrentUserId
 from ai_butler.api.schemas import (
     AgentDefinitionListResponse,
     ApprovalDecisionRequest,
+    AuthConfigResponse,
     AvailabilityRequest,
     CitationResponseV1,
     CompleteUploadRequest,
     ConversationListResponse,
     ConversationResponse,
-    CreateConversationRequest,
     DeleteAccountRequest,
     LogoutRequest,
     MessageListResponse,
+    PhoneLoginRequest,
+    PhoneVerificationCodeRequest,
+    PhoneVerificationCodeResponse,
     PreferencesRequest,
     ProfileRequest,
     RefreshRequest,
@@ -32,6 +34,7 @@ from ai_butler.api.schemas import (
     SendMessageRequest,
     SendMessageResponse,
     TaskExecutionRequest,
+    TokenResponse,
     UpdateMeRequest,
     UploadIntentRequest,
     WechatLoginRequest,
@@ -42,7 +45,42 @@ from ai_butler.security import InvalidTokenError, verify_signed_ticket
 router = APIRouter(prefix="/v1")
 
 
-@router.post("/auth/wechat/login", tags=["auth"])
+@router.get("/auth/config", response_model=AuthConfigResponse, tags=["auth"])
+async def auth_config(butler: Butler) -> dict[str, object]:
+    """返回登录页可公开使用的服务端能力配置。"""
+
+    return butler.auth_config()
+
+
+@router.post(
+    "/auth/phone/verification-codes",
+    response_model=PhoneVerificationCodeResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    tags=["auth"],
+)
+async def send_phone_verification_code(
+    payload: PhoneVerificationCodeRequest,
+    butler: Butler,
+    idempotency_key: str = Header(alias="Idempotency-Key"),
+) -> dict[str, object]:
+    """创建并发送一次性手机号登录验证码挑战。"""
+
+    return await butler.send_phone_verification_code(payload, idempotency_key)
+
+
+@router.post("/auth/phone/login", response_model=TokenResponse, tags=["auth"])
+async def phone_login(
+    payload: PhoneLoginRequest,
+    butler: Butler,
+    idempotency_key: str = Header(alias="Idempotency-Key"),
+) -> dict[str, object]:
+    """按唯一手机号登录；验证码要求完全由服务端配置决定。"""
+
+    del idempotency_key
+    return await butler.phone_login(payload)
+
+
+@router.post("/auth/wechat/login", response_model=TokenResponse, tags=["auth"])
 async def wechat_login(
     payload: WechatLoginRequest,
     request: Request,
@@ -50,17 +88,15 @@ async def wechat_login(
     idempotency_key: str = Header(alias="Idempotency-Key"),
 ) -> dict[str, object]:
     del idempotency_key
-    settings = request.app.state.settings
-    provider = (
-        MockWechatAuthProvider()
-        if settings.wechat_auth_mode == "mock"
-        else WechatCodeAuthProvider(settings.wechat_app_id, settings.wechat_app_secret)
-    )
+    provider = request.app.state.wechat_auth_provider
     try:
         identity = await provider.exchange(payload.login_code)
+        phone = await provider.exchange_phone(payload.phone_code)
     except ValueError as exc:
-        raise ButlerError("WECHAT_LOGIN_FAILED", "微信登录失败，请重试", 401, True) from exc
-    return await butler.login(identity, payload.device_id)
+        raise ButlerError(
+            "WECHAT_PHONE_AUTH_FAILED", "微信授权登录失败，请重试", 401, True
+        ) from exc
+    return await butler.wechat_login(identity, phone, payload.device_id)
 
 
 @router.post("/auth/refresh", tags=["auth"])
@@ -211,18 +247,6 @@ async def conversations(
     return await butler.list_conversations(user_id, limit, cursor)
 
 
-@router.post(
-    "/conversations",
-    status_code=status.HTTP_201_CREATED,
-    response_model=ConversationResponse,
-    tags=["conversations"],
-)
-async def create_conversation(
-    payload: CreateConversationRequest, user_id: CurrentUserId, butler: Butler
-) -> dict[str, object]:
-    return await butler.create_conversation(user_id, payload)
-
-
 @router.get(
     "/conversations/{conversation_id}",
     response_model=ConversationResponse,
@@ -232,6 +256,24 @@ async def conversation(
     conversation_id: UUID, user_id: CurrentUserId, butler: Butler
 ) -> dict[str, object]:
     return await butler.get_conversation(user_id, conversation_id)
+
+
+@router.delete(
+    "/conversations/{conversation_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    tags=["conversations"],
+)
+async def delete_conversation(
+    conversation_id: UUID,
+    user_id: CurrentUserId,
+    butler: Butler,
+    idempotency_key: str = Header(alias="Idempotency-Key"),
+) -> Response:
+    """软删除一个已归档会话；幂等键由客户端为副作用请求提供。"""
+
+    del idempotency_key
+    await butler.delete_conversation(user_id, conversation_id)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.get(
@@ -250,18 +292,39 @@ async def messages(
 
 
 @router.post(
-    "/conversations/{conversation_id}/messages",
+    "/messages",
     status_code=status.HTTP_202_ACCEPTED,
     response_model=SendMessageResponse,
     tags=["conversations"],
 )
 async def send_message(
+    payload: SendMessageRequest,
+    user_id: CurrentUserId,
+    butler: Butler,
+) -> dict[str, object]:
+    return await butler.send_message(user_id, payload)
+
+
+@router.post(
+    "/conversations/{conversation_id}/messages",
+    status_code=status.HTTP_202_ACCEPTED,
+    include_in_schema=False,
+)
+async def send_message_legacy(
     conversation_id: UUID,
     payload: SendMessageRequest,
     user_id: CurrentUserId,
     butler: Butler,
 ) -> dict[str, object]:
-    return await butler.send_message(user_id, conversation_id, payload)
+    """兼容旧客户端；不属于公共契约，也不提供创建新场景能力。"""
+
+    targeted = payload.model_copy(
+        update={
+            "target_conversation_id": conversation_id,
+            "context_policy": "CONTINUE_CURRENT",
+        }
+    )
+    return await butler.send_message(user_id, targeted)
 
 
 @router.get("/agent-runs/{run_id}", tags=["chat"])
@@ -337,7 +400,9 @@ async def cancel_run(
 async def retry_run(
     run_id: UUID, payload: RetryRunRequest, user_id: CurrentUserId, butler: Butler
 ) -> dict[str, object]:
-    return await butler.retry_run(user_id, run_id, payload.expected_attempt)
+    return await butler.retry_run(
+        user_id, run_id, payload.expected_attempt, payload.execution_policy
+    )
 
 
 @router.post("/approvals/{approval_id}/decisions", tags=["chat"])

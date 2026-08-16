@@ -1,6 +1,7 @@
 export type MainTab = 'home' | 'plans' | 'chat' | 'mine'
 
-export type SheetName = 'attachments' | 'source' | 'settings' | 'materials' | 'history' | null
+export type SheetName =
+  'assistants' | 'attachments' | 'source' | 'settings' | 'materials' | 'history' | null
 
 export type PlanTone = 'blue' | 'purple' | 'green'
 
@@ -67,6 +68,9 @@ export interface ConversationViewModel {
   section: 'today' | 'week' | 'earlier'
   archived: boolean
   agentCode?: AgentShortcutCode
+  runId?: string
+  runStatus?: string
+  statusLabel: '待回复' | '待确认' | '待重试' | '处理中' | '已完成'
 }
 
 export interface SourceSummaryViewModel {

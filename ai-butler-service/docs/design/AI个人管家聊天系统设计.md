@@ -23,7 +23,7 @@
 
 ### 2.1 本期范围
 
-- 多会话幂等创建、自动归档与历史恢复
+- 单一消息入口、自动会话归档与历史恢复（不提供手动新建）
 - 消息历史分页
 - 不可见的上下文分段、智能压缩、自动归档和线程轮换
 - 跨归档分段的受控长期记忆
@@ -102,7 +102,9 @@ SSE 接口从 `agent_run_events` 按序读取事件，Worker 将面向用户的�
 ### 4.1 Conversation
 
 - 每个用户可拥有多个会话，但最多一个 `CURRENT`；其他为 `ARCHIVED`。所有会话绑定内置 `BUTLER`，专业会话另固定 `specialist_user_agent_id`。
-- 新建会话自动归档当前会话；查看历史不切换状态，向历史会话发送消息时才原子恢复并归档此前当前会话。
+- 用户不手动新建会话。发送消息时由结构化流程、专业助理边界和 `ConversationRouter` 依次判断延续、恢复或归档并创建场景；归档、创建和首条消息写入同一事务。
+- 专业助理欢迎页是客户端临时状态，不写数据库；首次发送才创建专业场景。同一助理存在待回复、待审批或待重试任务时优先恢复。
+- 已归档会话可软删除；`deleted_at` 生效后所有公共会话和消息查询均按不存在处理，CURRENT 会话禁止删除。
 - 后台 `conversation_segments` 对模型上下文分段，每个 segment 对应一个不可变 `thread_id`；用户看到的消息时间线跨 segment 连续。
 - 产品会话归档与 segment 轮换是两套状态机：前者不删除消息、摘要或 checkpoint，后者只压缩和轮换内部上下文。
 
@@ -140,14 +142,15 @@ RUNNING → CANCEL_REQUESTED → CANCELLED
 QUEUED/等待态/可重试失败 → CANCELLED
 ```
 
-全用户同一时间最多有一个非终态 run（同时保留每会话唯一约束）。非终态包括：
+每个会话最多一个非终态 run；全用户同一时间最多一个真正执行中的 run。等待用户的流程可跨会话并存。
+
+用户级执行互斥状态包括：
 
 - `QUEUED`
 - `RUNNING`
-- `AWAITING_INPUT`
-- `AWAITING_APPROVAL`
-- `FAILED_RETRYABLE`
 - `CANCEL_REQUESTED`
+
+`AWAITING_INPUT`、`AWAITING_APPROVAL`、`FAILED_RETRYABLE` 属于可持久挂起状态，不占用用户级执行槽。
 
 ### 4.5 Event
 
@@ -163,8 +166,8 @@ QUEUED/等待态/可重试失败 → CANCELLED
 |---|---|---|
 | `GET` | `/v1/agent-definitions` | 获取专业快捷入口目录 |
 | `GET` | `/v1/conversations` | CURRENT 优先、最近消息倒序分页 |
-| `POST` | `/v1/conversations` | 幂等新建普通或专业会话并归档当前会话 |
 | `GET` | `/v1/conversations/{id}` | 获取会话详情和活动 run |
+| `DELETE` | `/v1/conversations/{id}` | 幂等软删除已归档会话 |
 | `GET` | `/v1/conversations/{id}/messages` | 跨内部 segment 分页获取该会话消息 |
 
 客户端在路径中传公开会话 ID，但归属只从认证用户校验；跨用户访问统一安全 404。客户端不传 `segment_id`、`thread_id` 或 `user_agent_id`。
@@ -174,7 +177,7 @@ QUEUED/等待态/可重试失败 → CANCELLED
 ### 5.2 发送消息
 
 ```http
-POST /v1/conversations/{conversation_id}/messages
+POST /v1/messages
 Authorization: Bearer <access_token>
 Content-Type: application/json
 ```
@@ -183,6 +186,10 @@ Content-Type: application/json
 {
   "schema_version": "1.0",
   "client_message_id": "0190...",
+  "target_conversation_id": null,
+  "specialist_code": null,
+  "context_policy": "AUTO",
+  "execution_policy": "REJECT",
   "content": "我每天晚上可以学习两个小时",
   "attachments": []
 }
@@ -194,6 +201,10 @@ Content-Type: application/json
 {
   "schema_version": "1.0",
   "conversation_id": "uuid",
+  "transition": {
+    "kind": "CONTINUED",
+    "archived_conversation_id": null
+  },
   "user_message": {
     "id": "uuid",
     "status": "COMPLETED"

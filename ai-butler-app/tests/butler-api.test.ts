@@ -11,7 +11,10 @@ describe('business API facade', () => {
   it('covers authenticated read and mutation endpoints', async () => {
     const token = 'access'
     const calls = [
-      butlerApi.login({} as never),
+      butlerApi.authConfig(),
+      butlerApi.sendPhoneVerificationCode({} as never),
+      butlerApi.phoneLogin({} as never),
+      butlerApi.wechatLogin({} as never),
       butlerApi.refresh({} as never),
       butlerApi.logout({} as never, token),
       butlerApi.me(token),
@@ -21,11 +24,12 @@ describe('business API facade', () => {
       butlerApi.executeTask('task/id', {} as never, token),
       butlerApi.agentDefinitions(token),
       butlerApi.conversations(token),
-      butlerApi.createConversation({} as never, token),
       butlerApi.conversation('conversation/id', token),
+      butlerApi.deleteConversation('conversation/id', token),
       butlerApi.messages('conversation/id', token),
-      butlerApi.sendMessage('conversation/id', {} as never, token),
+      butlerApi.sendMessage({} as never, token),
       butlerApi.run('run/id', token),
+      butlerApi.cancelRun('run/id', token),
       butlerApi.streamTicket('run/id', token),
       butlerApi.approve('approval/id', {} as never, token),
       butlerApi.preferences(token),
@@ -39,6 +43,9 @@ describe('business API facade', () => {
     await Promise.all(calls)
     expect(requestMock).toHaveBeenCalledTimes(calls.length)
     expect(requestMock).toHaveBeenCalledWith(
+      expect.objectContaining({ path: '/v1/auth/phone/verification-codes', method: 'POST' }),
+    )
+    expect(requestMock).toHaveBeenCalledWith(
       expect.objectContaining({ path: '/v1/me/preferences', method: 'PATCH' }),
     )
     expect(requestMock).toHaveBeenCalledWith(
@@ -49,6 +56,16 @@ describe('business API facade', () => {
     )
     expect(requestMock).toHaveBeenCalledWith(
       expect.objectContaining({ path: '/v1/conversations/conversation%2Fid/messages?limit=50' }),
+    )
+    expect(requestMock).toHaveBeenCalledWith(
+      expect.objectContaining({ path: '/v1/messages', method: 'POST' }),
+    )
+    expect(requestMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        path: '/v1/conversations/conversation%2Fid',
+        method: 'DELETE',
+        headers: expect.objectContaining({ 'Idempotency-Key': expect.any(String) }),
+      }),
     )
   })
 

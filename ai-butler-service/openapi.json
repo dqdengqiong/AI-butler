@@ -172,6 +172,15 @@
             "title": "Approval Id",
             "type": "string"
           },
+          "execution_policy": {
+            "default": "REJECT",
+            "enum": [
+              "REJECT",
+              "CANCEL_OTHER"
+            ],
+            "title": "Execution Policy",
+            "type": "string"
+          },
           "expected_approval_version": {
             "minimum": 1.0,
             "title": "Expected Approval Version",
@@ -223,6 +232,40 @@
           "position"
         ],
         "title": "AttachmentInput",
+        "type": "object"
+      },
+      "AuthConfigResponse": {
+        "properties": {
+          "sms_code_length": {
+            "maximum": 8.0,
+            "minimum": 4.0,
+            "title": "Sms Code Length",
+            "type": "integer"
+          },
+          "sms_code_ttl_seconds": {
+            "maximum": 900.0,
+            "minimum": 60.0,
+            "title": "Sms Code Ttl Seconds",
+            "type": "integer"
+          },
+          "sms_resend_seconds": {
+            "maximum": 300.0,
+            "minimum": 10.0,
+            "title": "Sms Resend Seconds",
+            "type": "integer"
+          },
+          "sms_verification_enabled": {
+            "title": "Sms Verification Enabled",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "sms_verification_enabled",
+          "sms_code_length",
+          "sms_code_ttl_seconds",
+          "sms_resend_seconds"
+        ],
+        "title": "AuthConfigResponse",
         "type": "object"
       },
       "AvailabilityRequest": {
@@ -645,37 +688,34 @@
         "title": "ConversationSpecialistResponse",
         "type": "object"
       },
-      "CreateConversationRequest": {
-        "description": "创建一个用户可见会话；专业入口只接受公开稳定 code。",
+      "ConversationTransitionResponse": {
         "properties": {
-          "client_conversation_id": {
-            "format": "uuid",
-            "title": "Client Conversation Id",
-            "type": "string"
-          },
-          "schema_version": {
-            "const": "1.0",
-            "default": "1.0",
-            "title": "Schema Version",
-            "type": "string"
-          },
-          "specialist_code": {
+          "archived_conversation_id": {
             "anyOf": [
               {
-                "maxLength": 64,
+                "format": "uuid",
                 "type": "string"
               },
               {
                 "type": "null"
               }
             ],
-            "title": "Specialist Code"
+            "title": "Archived Conversation Id"
+          },
+          "kind": {
+            "enum": [
+              "CONTINUED",
+              "CREATED",
+              "RESUMED"
+            ],
+            "title": "Kind",
+            "type": "string"
           }
         },
         "required": [
-          "client_conversation_id"
+          "kind"
         ],
-        "title": "CreateConversationRequest",
+        "title": "ConversationTransitionResponse",
         "type": "object"
       },
       "DeleteAccountRequest": {
@@ -852,6 +892,114 @@
           "created_at"
         ],
         "title": "MessageResponse",
+        "type": "object"
+      },
+      "PhoneLoginRequest": {
+        "properties": {
+          "consent": {
+            "$ref": "#/components/schemas/ConsentInput"
+          },
+          "device_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Device Id",
+            "type": "string"
+          },
+          "phone": {
+            "maxLength": 14,
+            "minLength": 11,
+            "title": "Phone",
+            "type": "string"
+          },
+          "schema_version": {
+            "const": "1.0",
+            "default": "1.0",
+            "title": "Schema Version",
+            "type": "string"
+          },
+          "verification_challenge_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Verification Challenge Id"
+          },
+          "verification_code": {
+            "anyOf": [
+              {
+                "maxLength": 8,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Verification Code"
+          }
+        },
+        "required": [
+          "phone",
+          "device_id",
+          "consent"
+        ],
+        "title": "PhoneLoginRequest",
+        "type": "object"
+      },
+      "PhoneVerificationCodeRequest": {
+        "properties": {
+          "device_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Device Id",
+            "type": "string"
+          },
+          "phone": {
+            "maxLength": 14,
+            "minLength": 11,
+            "title": "Phone",
+            "type": "string"
+          },
+          "schema_version": {
+            "const": "1.0",
+            "default": "1.0",
+            "title": "Schema Version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "phone",
+          "device_id"
+        ],
+        "title": "PhoneVerificationCodeRequest",
+        "type": "object"
+      },
+      "PhoneVerificationCodeResponse": {
+        "properties": {
+          "challenge_id": {
+            "format": "uuid",
+            "title": "Challenge Id",
+            "type": "string"
+          },
+          "expires_in": {
+            "title": "Expires In",
+            "type": "integer"
+          },
+          "resend_after": {
+            "title": "Resend After",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "challenge_id",
+          "expires_in",
+          "resend_after"
+        ],
+        "title": "PhoneVerificationCodeResponse",
         "type": "object"
       },
       "PreferencesRequest": {
@@ -1034,6 +1182,15 @@
       },
       "RetryRunRequest": {
         "properties": {
+          "execution_policy": {
+            "default": "REJECT",
+            "enum": [
+              "REJECT",
+              "CANCEL_OTHER"
+            ],
+            "title": "Execution Policy",
+            "type": "string"
+          },
           "expected_attempt": {
             "minimum": 0.0,
             "title": "Expected Attempt",
@@ -1134,6 +1291,25 @@
             "title": "Content",
             "type": "string"
           },
+          "context_policy": {
+            "default": "AUTO",
+            "enum": [
+              "AUTO",
+              "CONTINUE_CURRENT",
+              "ARCHIVE_AND_START"
+            ],
+            "title": "Context Policy",
+            "type": "string"
+          },
+          "execution_policy": {
+            "default": "REJECT",
+            "enum": [
+              "REJECT",
+              "CANCEL_OTHER"
+            ],
+            "title": "Execution Policy",
+            "type": "string"
+          },
           "schema_version": {
             "const": "1.0",
             "default": "1.0",
@@ -1149,6 +1325,30 @@
                 "type": "null"
               }
             ]
+          },
+          "specialist_code": {
+            "anyOf": [
+              {
+                "maxLength": 64,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Specialist Code"
+          },
+          "target_conversation_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target Conversation Id"
           }
         },
         "required": [
@@ -1178,6 +1378,9 @@
           "stream": {
             "$ref": "#/components/schemas/RunStreamResponse"
           },
+          "transition": {
+            "$ref": "#/components/schemas/ConversationTransitionResponse"
+          },
           "user_message": {
             "$ref": "#/components/schemas/AcceptedMessageResponse"
           }
@@ -1185,6 +1388,7 @@
         "required": [
           "schema_version",
           "conversation_id",
+          "transition",
           "user_message",
           "assistant_message",
           "run",
@@ -1258,6 +1462,44 @@
           "occurred_at"
         ],
         "title": "TaskExecutionRequest",
+        "type": "object"
+      },
+      "TokenResponse": {
+        "properties": {
+          "access_token": {
+            "title": "Access Token",
+            "type": "string"
+          },
+          "expires_in": {
+            "title": "Expires In",
+            "type": "integer"
+          },
+          "refresh_expires_in": {
+            "title": "Refresh Expires In",
+            "type": "integer"
+          },
+          "refresh_token": {
+            "title": "Refresh Token",
+            "type": "string"
+          },
+          "token_type": {
+            "const": "Bearer",
+            "default": "Bearer",
+            "title": "Token Type",
+            "type": "string"
+          },
+          "user": {
+            "$ref": "#/components/schemas/UserResponse"
+          }
+        },
+        "required": [
+          "access_token",
+          "expires_in",
+          "refresh_token",
+          "refresh_expires_in",
+          "user"
+        ],
+        "title": "TokenResponse",
         "type": "object"
       },
       "UnreadyResponse": {
@@ -1388,6 +1630,75 @@
         "title": "UploadIntentRequest",
         "type": "object"
       },
+      "UserResponse": {
+        "properties": {
+          "avatar_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Avatar Url"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "is_new_user": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Is New User"
+          },
+          "locale": {
+            "title": "Locale",
+            "type": "string"
+          },
+          "nickname": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Nickname"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "timezone": {
+            "title": "Timezone",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "nickname",
+          "locale",
+          "timezone",
+          "status",
+          "created_at"
+        ],
+        "title": "UserResponse",
+        "type": "object"
+      },
       "ValidationError": {
         "properties": {
           "ctx": {
@@ -1443,6 +1754,11 @@
             "title": "Login Code",
             "type": "string"
           },
+          "phone_code": {
+            "minLength": 1,
+            "title": "Phone Code",
+            "type": "string"
+          },
           "provider": {
             "default": "WECHAT_MINIAPP",
             "enum": [
@@ -1461,6 +1777,7 @@
         },
         "required": [
           "login_code",
+          "phone_code",
           "device_id",
           "consent"
         ],
@@ -1961,6 +2278,28 @@
         ]
       }
     },
+    "/v1/auth/config": {
+      "get": {
+        "description": "返回登录页可公开使用的服务端能力配置。",
+        "operationId": "auth_config_v1_auth_config_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthConfigResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Auth Config",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
     "/v1/auth/logout": {
       "post": {
         "operationId": "logout_v1_auth_logout_post",
@@ -2008,6 +2347,112 @@
           }
         },
         "summary": "Logout",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
+    "/v1/auth/phone/login": {
+      "post": {
+        "description": "按唯一手机号登录；验证码要求完全由服务端配置决定。",
+        "operationId": "phone_login_v1_auth_phone_login_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PhoneLoginRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TokenResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Phone Login",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
+    "/v1/auth/phone/verification-codes": {
+      "post": {
+        "description": "创建并发送一次性手机号登录验证码挑战。",
+        "operationId": "send_phone_verification_code_v1_auth_phone_verification_codes_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PhoneVerificationCodeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PhoneVerificationCodeResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Send Phone Verification Code",
         "tags": [
           "auth"
         ]
@@ -2085,9 +2530,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Wechat Login V1 Auth Wechat Login Post",
-                  "type": "object"
+                  "$ref": "#/components/schemas/TokenResponse"
                 }
               }
             },
@@ -2245,10 +2688,32 @@
         "tags": [
           "conversations"
         ]
-      },
-      "post": {
-        "operationId": "create_conversation_v1_conversations_post",
+      }
+    },
+    "/v1/conversations/{conversation_id}": {
+      "delete": {
+        "description": "软删除一个已归档会话；幂等键由客户端为副作用请求提供。",
+        "operationId": "delete_conversation_v1_conversations__conversation_id__delete",
         "parameters": [
+          {
+            "in": "path",
+            "name": "conversation_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Conversation Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          },
           {
             "in": "header",
             "name": "authorization",
@@ -2266,25 +2731,8 @@
             }
           }
         ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/CreateConversationRequest"
-              }
-            }
-          },
-          "required": true
-        },
         "responses": {
-          "201": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ConversationResponse"
-                }
-              }
-            },
+          "204": {
             "description": "Successful Response"
           },
           "422": {
@@ -2298,13 +2746,11 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Create Conversation",
+        "summary": "Delete Conversation",
         "tags": [
           "conversations"
         ]
-      }
-    },
-    "/v1/conversations/{conversation_id}": {
+      },
       "get": {
         "operationId": "conversation_v1_conversations__conversation_id__get",
         "parameters": [
@@ -2445,73 +2891,6 @@
           }
         },
         "summary": "Messages",
-        "tags": [
-          "conversations"
-        ]
-      },
-      "post": {
-        "operationId": "send_message_v1_conversations__conversation_id__messages_post",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "conversation_id",
-            "required": true,
-            "schema": {
-              "format": "uuid",
-              "title": "Conversation Id",
-              "type": "string"
-            }
-          },
-          {
-            "in": "header",
-            "name": "authorization",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Authorization"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/SendMessageRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "202": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/SendMessageResponse"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Send Message",
         "tags": [
           "conversations"
         ]
@@ -3584,6 +3963,65 @@
         "summary": "Put Profile",
         "tags": [
           "user"
+        ]
+      }
+    },
+    "/v1/messages": {
+      "post": {
+        "operationId": "send_message_v1_messages_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SendMessageRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SendMessageResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Send Message",
+        "tags": [
+          "conversations"
         ]
       }
     },

@@ -19,6 +19,11 @@ async def test_mock_wechat_rejects_empty_code() -> None:
         await MockWechatAuthProvider().exchange("  ")
 
 
+async def test_mock_wechat_phone_can_use_explicit_synthetic_number() -> None:
+    phone = await MockWechatAuthProvider().exchange_phone("phone:+8613800138000")
+    assert phone == "+8613800138000"
+
+
 async def test_recording_notification_is_idempotent() -> None:
     provider = RecordingNotificationProvider()
     first = Notification(

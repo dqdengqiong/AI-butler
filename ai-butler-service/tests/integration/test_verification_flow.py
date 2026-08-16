@@ -20,6 +20,7 @@ def _login_payload(code: str, device: str) -> dict[str, object]:
     return {
         "schema_version": "1.0",
         "login_code": code,
+        "phone_code": f"phone-code-{code}",
         "provider": "WECHAT_MOCK",
         "device_id": device,
         "consent": {
@@ -55,13 +56,9 @@ async def test_complete_mock_login_plan_approval_task_file_and_governance_flow(
         assert login.status_code == 200, login.text
         auth = login.json()
         headers = {"Authorization": f"Bearer {auth['access_token']}"}
-        conversation_id = (await client.get("/v1/conversations", headers=headers)).json()["items"][
-            0
-        ]["id"]
-
         assert (await client.get("/v1/me")).status_code == 401
         invalid_body = await client.post(
-            f"/v1/conversations/{conversation_id}/messages",
+            "/v1/messages",
             headers=headers,
             json={"schema_version": "1.0"},
         )
@@ -87,42 +84,50 @@ async def test_complete_mock_login_plan_approval_task_file_and_governance_flow(
         assert renamed.json()["nickname"] == "验证用户"
         profile = await client.get("/v1/me/profile", headers=headers)
         profile_version = profile.json()["profile_version"]
+        profile_update = {
+            "schema_version": "1.0",
+            "expected_version": profile_version,
+            "education_level": "本科",
+            "major": "计算机",
+            "region_code": "CN-44",
+            "current_level": "BEGINNER",
+            "existing_material_file_ids": [],
+        }
         assert (
             await client.put(
                 "/v1/me/profile",
                 headers=headers,
-                json={
-                    "schema_version": "1.0",
-                    "expected_version": profile_version,
-                    "education_level": "本科",
-                    "major": "计算机",
-                    "region_code": "CN-44",
-                    "current_level": "BEGINNER",
-                    "existing_material_file_ids": [],
-                },
+                json=profile_update,
             )
         ).status_code == 200
+        assert (
+            await client.put("/v1/me/profile", headers=headers, json=profile_update)
+        ).status_code == 409
         availability = await client.get("/v1/me/availability", headers=headers)
+        availability_update = {
+            "schema_version": "1.0",
+            "expected_version": availability.json()["version"],
+            "windows": [
+                {
+                    "day_of_week": 1,
+                    "start_time": "20:00:00",
+                    "end_time": "21:00:00",
+                    "available_minutes": 60,
+                    "effective_from": date.today().isoformat(),
+                    "effective_to": None,
+                }
+            ],
+        }
         assert (
             await client.put(
                 "/v1/me/availability",
                 headers=headers,
-                json={
-                    "schema_version": "1.0",
-                    "expected_version": availability.json()["version"],
-                    "windows": [
-                        {
-                            "day_of_week": 1,
-                            "start_time": "20:00:00",
-                            "end_time": "21:00:00",
-                            "available_minutes": 60,
-                            "effective_from": date.today().isoformat(),
-                            "effective_to": None,
-                        }
-                    ],
-                },
+                json=availability_update,
             )
         ).status_code == 200
+        assert (
+            await client.put("/v1/me/availability", headers=headers, json=availability_update)
+        ).status_code == 409
         preferences = (await client.get("/v1/me/preferences", headers=headers)).json()
         changed_preferences = await client.patch(
             "/v1/me/preferences",
@@ -137,12 +142,22 @@ async def test_complete_mock_login_plan_approval_task_file_and_governance_flow(
             },
         )
         assert changed_preferences.status_code == 200
+        stale_preferences = await client.patch(
+            "/v1/me/preferences",
+            headers=headers,
+            json={
+                "expected_version": preferences["version"],
+                "task_reminder": {
+                    "enabled": False,
+                    "channels": ["IN_APP"],
+                    "advance_minutes": 5,
+                },
+            },
+        )
+        assert stale_preferences.status_code == 409
 
-        assert (
-            await client.get(f"/v1/conversations/{conversation_id}", headers=headers)
-        ).status_code == 200
         first = await client.post(
-            f"/v1/conversations/{conversation_id}/messages",
+            "/v1/messages",
             headers=headers,
             json={
                 "schema_version": "1.0",
@@ -153,9 +168,14 @@ async def test_complete_mock_login_plan_approval_task_file_and_governance_flow(
             },
         )
         assert first.status_code == 202, first.text
+        conversation_id = first.json()["conversation_id"]
+        assert (
+            await client.get(f"/v1/conversations/{conversation_id}", headers=headers)
+        ).status_code == 200
         run_id = first.json()["run"]["id"]
         waiting = (await client.get(f"/v1/agent-runs/{run_id}", headers=headers)).json()
-        for _ in range(10):
+        # 共享测试库可能保留其他用例尚未领取的 run；持续轮询直到本用例被领取。
+        for _ in range(100):
             if waiting["status"] != "QUEUED":
                 break
             assert await app.state.butler.worker_poll_once(uuid4()) is True

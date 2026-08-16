@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.13,<3.14"
 dependencies = [
   "alembic>=1.16,<2",
+  "cryptography>=45,<47",
   "fastapi>=0.116,<1",
   "httpx>=0.28,<1",
   "langgraph>=0.6,<2",
@@ -37,6 +38,7 @@ butler-api = "ai_butler.api.main:run"
 butler-agent-worker = "ai_butler.workers.agent:main"
 butler-scheduler-worker = "ai_butler.workers.scheduler:main"
 butler-seed = "ai_butler.scripts.seed:main"
+butler-reset-users = "ai_butler.scripts.reset_users:main"
 butler-eval-live = "ai_butler.scripts.run_agent_evals:main"
 
 [build-system]

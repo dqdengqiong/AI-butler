@@ -13,7 +13,7 @@
 
 MVP 重点覆盖：
 
-1. 微信登录、当前用户和规划画像
+1. H5 手机号登录、微信授权手机号登录、当前用户和规划画像
 2. 首页总览、计划列表和任务打卡
 3. 多会话、专业 Agent 目录、Agent Run 和 SSE 事件流
 4. 首计划/组合计划创建、单计划调整和用户审批
@@ -25,7 +25,7 @@ MVP 重点覆盖：
 ### 2.1 业务边界
 
 - 所有会话底层绑定 `BUTLER`。客户端在路径中提交公开会话 ID、创建时可提交公开 `specialist_code`，但不传内部 `user_agent_id`、segment 或 thread ID。
-- 每个用户最多一个 `CURRENT` 会话；新建自动归档当前会话，向历史会话首次发送时原子恢复。查看历史本身不改变状态。
+- 每个用户最多一个未删除的 `CURRENT` 会话；新建或恢复时，当前会话没有 `USER` 消息则直接软删除且不归档，否则新建时同步取消当前非终态 run 并自动归档。查看历史本身不改变状态。
 - MVP 只正式开放公考领域，包括公务员备考、行测专项和申论专项。雅思、求职和健康只作为“即将开放”展示，不得调用正式创建接口。
 - 创建计划和调整计划都必须由 Agent 生成不可变 `plan_revision` 草案，并通过结构化审批接口确认。
 - 一次新建请求可以整组确认多个同领域计划；一次调整必须且只能影响一个已存在计划。
@@ -42,7 +42,7 @@ MVP 重点覆盖：
 | 附件选择后立即显示“已添加” | 先完成私有上传、安全扫描，再把 `file_id` 放入消息请求 |
 | 任务复选框可自由勾选/取消 | MVP 只支持提交执行结果；取消已完成状态暂不开放 |
 | “清除全部数据”仅修改前端状态 | 当前数据库只支持账号删除流程；MVP 应改为“注销账号” |
-| 手机号和游客登录可直接进入 | 均为原型演示；MVP 默认只实现微信登录 |
+| 客户端自行判断是否校验验证码 | 服务端公开配置并强制执行验证码策略，客户端只负责匹配交互 |
 | 来源卡直接打开固定弹窗 | 卡片携带 `claim_id`、`citation_id` 和 `document_id`，服务端校验后返回来源详情/短期地址 |
 
 ## 3. 通用约定
@@ -136,9 +136,9 @@ GET /v1/tasks?limit=20&cursor=<opaque_cursor>
 | 计划页 | `GET /v1/plans`、`GET /v1/tasks` |
 | 任务勾选 | `POST /v1/tasks/{task_id}/executions` |
 | 打开聊天 | `GET /v1/conversations`、`GET /v1/conversations/{id}/messages` |
-| 发送文字/语音转写/附件 | `POST /v1/conversations/{id}/messages` |
+| 发送文字/语音转写/附件 | `POST /v1/messages` |
 | Agent 进度与流式回复 | `POST /v1/agent-runs/{id}/stream-ticket`、`GET /v1/agent-runs/{id}/events` |
-| 选择卡提交 | `POST /v1/conversations/{id}/messages`；等待输入时恢复同一 run |
+| 选择卡提交 | `POST /v1/messages`；等待输入时恢复同一 run |
 | 确认创建/确认调整 | `POST /v1/approvals/{approval_id}/decisions` |
 | 继续修改 | 同上，`action=EDIT` 且携带 `feedback` |
 | 查看计划历史 | `GET /v1/plans/{id}/revisions` |
@@ -155,7 +155,10 @@ GET /v1/tasks?limit=20&cursor=<opaque_cursor>
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| `POST` | `/v1/auth/wechat/login` | 微信登录码换取令牌 |
+| `GET` | `/v1/auth/config` | 获取短信验证码开关与交互参数 |
+| `POST` | `/v1/auth/phone/verification-codes` | 创建并发送手机号登录验证码 |
+| `POST` | `/v1/auth/phone/login` | 使用唯一手机号登录 |
+| `POST` | `/v1/auth/wechat/login` | 微信登录码和授权手机号换取令牌 |
 | `POST` | `/v1/auth/refresh` | 轮换刷新令牌 |
 | `POST` | `/v1/auth/logout` | 撤销当前刷新会话 |
 | `GET` | `/v1/me` | 获取当前用户 |
@@ -186,7 +189,8 @@ MVP 不提供 `POST /goals`、`POST /plans`、`PATCH /plans` 或 `POST /tasks`�
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | `GET` | `/v1/agent-definitions` | 获取专业 Agent 快捷入口目录 |
-| `GET/POST` | `/v1/conversations` | 分页查询或幂等创建会话 |
+| `GET` | `/v1/conversations` | 分页查询自动归档的非空会话 |
+| `POST` | `/v1/messages` | 自动延续、恢复或创建场景并提交消息 |
 | `GET` | `/v1/conversations/{id}` | 获取会话详情 |
 | `GET/POST` | `/v1/conversations/{id}/messages` | 分页查询消息、发送或恢复等待输入的 run |
 | `GET` | `/v1/agent-runs/{id}` | 查询运行状态和补偿信息 |
@@ -211,7 +215,7 @@ MVP 不提供 `POST /goals`、`POST /plans`、`PATCH /plans` 或 `POST /tasks`�
 
 ## 6. 认证与用户接口
 
-### 6.1 微信登录
+### 6.1 手机号与微信登录
 
 ```http
 POST /v1/auth/wechat/login
@@ -222,6 +226,7 @@ Idempotency-Key: 0190...
 {
   "schema_version": "1.0",
   "login_code": "one-time-wechat-code",
+  "phone_code": "one-time-phone-code",
   "provider": "WECHAT_MINIAPP",
   "device_id": "installation-id",
   "consent": {
@@ -253,9 +258,13 @@ Idempotency-Key: 0190...
 }
 ```
 
-服务端使用微信稳定主体创建或查询 `user_identities`，并幂等创建 `BUTLER user_agent`、初始 `CURRENT` 会话和 ACTIVE segment。不得把微信 session key 返回客户端或写普通日志。
+服务端先使用授权手机号 HMAC 查询唯一账号，再把微信稳定主体绑定到同一用户，并幂等创建
+`BUTLER user_agent`、初始 `CURRENT` 会话和 ACTIVE segment。不得把微信 session key、
+接口 access token 或完整手机号返回客户端或写普通日志。
 
-手机号验证码登录和游客登录不属于 MVP。若后续启用，应新增独立验证码挑战表与限流/风控设计，不能接受原型中的“任意 4–6 位验证码”。
+H5 调用 `/v1/auth/phone/login`。`SMS_VERIFICATION_ENABLED=false` 时只校验大陆手机号格式；
+开启后必须先通过 `/v1/auth/phone/verification-codes` 获取挑战，并在登录请求中提交
+`verification_challenge_id` 和一次性验证码。验证码策略只由服务端裁决。
 
 ### 6.2 刷新与退出
 
@@ -616,31 +625,25 @@ POST /v1/tasks/{task_id}/executions
 
 ## 8. 聊天与 Agent Run 接口
 
-> 0.1 预发布契约重置：本节多会话接口已直接替换 `/v1/chat`，不提供旧客户端兼容层。
+> 0.2 预发布契约重置：公共写入口统一为 `POST /v1/messages`，不提供手动创建会话能力。
 
 ### 8.1 Agent 快捷入口目录
 
-`GET /v1/agent-definitions` 返回 `code`、名称、说明、图标、`AVAILABLE | COMING_SOON`、欢迎语和推荐问题。`BUTLER` 为隐藏能力；未开放 code 创建会话时返回 `409 AGENT_NOT_AVAILABLE`。
+`GET /v1/agent-definitions` 返回 `code`、名称、说明、图标、`AVAILABLE | COMING_SOON`、欢迎语和推荐问题。`BUTLER` 为隐藏能力；未开放 code 首次发送时返回 `409 AGENT_NOT_AVAILABLE`。
 
-### 8.2 会话列表与创建
+### 8.2 会话列表与自动归档
 
 ```http
 GET /v1/conversations?limit=30&cursor=<opaque_cursor>
 ```
 
-列表按 `CURRENT` 优先、最近消息倒序返回 `id`、`title`、`status`、`specialist`、`last_message`、`last_message_at` 和 `active_run`，不暴露 User Agent ID。
+列表按 `CURRENT` 优先、最近消息倒序返回 `id`、`title`、`status`、`specialist`、`last_message`、`last_message_at` 和 `active_run`，不暴露 User Agent ID。只有包含 `USER` 消息的会话进入列表；专业欢迎态完全由客户端临时展示。
 
-```http
-POST /v1/conversations
-```
-
-```json
-{"schema_version":"1.0","client_conversation_id":"uuid","specialist_code":"CIVIL_SERVICE_EXAM"}
-```
-
-`specialist_code` 为空创建普通会话。服务端锁用户行、检查全局 run、归档当前会话并创建新会话；专业欢迎语作为静态 Assistant 消息持久化但不创建 run。`(user_id, client_conversation_id)` 保证创建幂等。
+公共契约没有 `POST /v1/conversations`。普通消息由服务端语义路由；专业入口传公开 `specialist_code`；历史续聊传 `target_conversation_id`。归档、自动创建和首条消息写入必须处于同一事务。
 
 `GET /v1/conversations/{id}` 读取详情。会话归属从认证用户解析，跨用户访问统一返回 404。
+
+`DELETE /v1/conversations/{id}` 携带 `Idempotency-Key`，仅软删除 `ARCHIVED` 会话并返回 `204`；同一用户重复删除仍返回 `204`。删除 `CURRENT` 返回 `409 CURRENT_CONVERSATION_DELETE_FORBIDDEN`，跨用户、已删除会话的详情、消息和发送入口均按 404 处理。
 
 ### 8.3 消息历史
 
@@ -672,13 +675,17 @@ GET /v1/conversations/{id}/messages?limit=30&cursor=<opaque_cursor>
 ### 8.4 发送消息
 
 ```http
-POST /v1/conversations/{id}/messages
+POST /v1/messages
 ```
 
 ```json
 {
   "schema_version": "1.0",
   "client_message_id": "0190...",
+  "target_conversation_id": null,
+  "specialist_code": null,
+  "context_policy": "AUTO",
+  "execution_policy": "REJECT",
   "content": "我准备参加 2027 年国考，每天可以学习 2 小时",
   "attachments": [
     {"file_id":"uuid","position":0}
@@ -689,7 +696,9 @@ POST /v1/conversations/{id}/messages
 
 `content` 和 `attachments` 至少一个非空。建议限制：文本 20,000 字符、附件最多 9 个、总大小按用途策略限制。
 
-若目标为 `ARCHIVED`，服务端在同一事务恢复目标并归档此前 `CURRENT`。新建、恢复或发送前若用户已有其他非终态 run，返回 `409 GLOBAL_RUN_IN_PROGRESS` 并附当前 run 和会话 ID。
+`context_policy` 默认 `AUTO`。历史续聊使用 `CONTINUE_CURRENT`；确认卡重试使用 `ARCHIVE_AND_START`，且复用同一 `client_message_id`。语义模糊返回 `409 TOPIC_SWITCH_CONFIRMATION_REQUIRED`；其他会话仍在执行时返回 `409 OTHER_CONVERSATION_RUNNING`。确认停止后以 `execution_policy=CANCEL_OTHER` 重试。
+
+专业助理切换是确定性新场景并自动中止旧执行；同一助理存在挂起任务时优先恢复。等待输入、待审批和待重试不占用户级执行槽，可以跨会话保存。
 
 `selection` 仅用于回答当前 `SelectionCard`，示例：
 
@@ -707,6 +716,7 @@ POST /v1/conversations/{id}/messages
 {
   "schema_version": "1.0",
   "conversation_id": "uuid",
+  "transition": {"kind":"CONTINUED","archived_conversation_id":null},
   "user_message": {"id":"uuid","status":"COMPLETED"},
   "assistant_message": {"id":"uuid","status":"PENDING"},
   "run": {
@@ -1222,7 +1232,7 @@ POST chat message
 ### 17.1 当前设计已作出的默认决定
 
 1. “清除全部数据”改为“注销账号”；不提供保留账号的数据清空。
-2. MVP 只实现微信登录；手机号和游客入口移除或明确标注演示。
+2. H5 只开放手机号登录；微信小程序只开放微信授权手机号登录；游客登录不开放。
 3. 任务完成后不能直接取消勾选；如需支持，应新增任务状态变更审计或 reversal 模型。
 4. 语音在客户端完成转写后作为普通文本发送；不保存原始音频。若需上传语音，需扩展文件 purpose、MIME 和转写作业。
 5. “计划变更需确认”是只读策略；仅在 RAG 实际返回引用时展示 SourceCard。
@@ -1238,7 +1248,7 @@ POST chat message
 
 ## 18. 验收场景
 
-1. 新用户微信登录后，重复请求不会创建多个用户、BUTLER 实例或主聊天。
+1. 同一手机号通过 H5 或微信登录都解析为同一 UUID，重复请求不会创建多个用户、BUTLER 实例或主聊天。
 2. 空首页返回 `experience_state=EMPTY`，创建首计划只能通过聊天和 PlanCard 审批完成。
 3. 信息不足时同一 run 进入 `AWAITING_INPUT`，补充信息后恢复原 run。
 4. 文本“确认”不会批准计划；只有审批接口会发布 revision。

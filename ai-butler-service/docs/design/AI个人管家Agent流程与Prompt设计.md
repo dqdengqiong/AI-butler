@@ -35,7 +35,7 @@
 - 专业会话创建时由服务端把公开 `specialist_code` 解析为当前用户的专业 Agent，并持久化到会话；客户端不得传 `user_agent_id`。
 - 创建 run 时将会话绑定复制到 `selected_user_agent_id`。Worker 必须使用该选择，不能在专业会话中静默切换到其他领域。
 - 普通会话由 Router 只在目录中 `AVAILABLE + ACTIVE` 的 Agent 中识别意图，并在执行能力前持久化本次选择。
-- 考公会话的超范围请求返回范围说明或建议新建普通会话；`COMING_SOON` 能力不能创建 User Agent 或执行。
+- 考公会话的超范围请求返回范围说明；用户表达其他目标时由统一消息入口确认或自动整理为普通新话题。`COMING_SOON` 能力不能创建 User Agent 或执行。
 
 ## 3. LangGraph State
 

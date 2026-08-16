@@ -160,6 +160,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/auth/config": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Auth Config
+         * @description 返回登录页可公开使用的服务端能力配置。
+         */
+        get: operations["auth_config_v1_auth_config_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/auth/logout": {
         parameters: {
             query?: never;
@@ -171,6 +191,46 @@ export interface paths {
         put?: never;
         /** Logout */
         post: operations["logout_v1_auth_logout_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/auth/phone/login": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Phone Login
+         * @description 按唯一手机号登录；验证码要求完全由服务端配置决定。
+         */
+        post: operations["phone_login_v1_auth_phone_login_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/auth/phone/verification-codes": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Send Phone Verification Code
+         * @description 创建并发送一次性手机号登录验证码挑战。
+         */
+        post: operations["send_phone_verification_code_v1_auth_phone_verification_codes_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -241,8 +301,7 @@ export interface paths {
         /** Conversations */
         get: operations["conversations_v1_conversations_get"];
         put?: never;
-        /** Create Conversation */
-        post: operations["create_conversation_v1_conversations_post"];
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -260,7 +319,11 @@ export interface paths {
         get: operations["conversation_v1_conversations__conversation_id__get"];
         put?: never;
         post?: never;
-        delete?: never;
+        /**
+         * Delete Conversation
+         * @description 软删除一个已归档会话；幂等键由客户端为副作用请求提供。
+         */
+        delete: operations["delete_conversation_v1_conversations__conversation_id__delete"];
         options?: never;
         head?: never;
         patch?: never;
@@ -276,8 +339,7 @@ export interface paths {
         /** Messages */
         get: operations["messages_v1_conversations__conversation_id__messages_get"];
         put?: never;
-        /** Send Message */
-        post: operations["send_message_v1_conversations__conversation_id__messages_post"];
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -494,6 +556,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/messages": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Send Message */
+        post: operations["send_message_v1_messages_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/plans": {
         parameters: {
             query?: never;
@@ -698,6 +777,12 @@ export interface components {
              * Format: uuid
              */
             approval_id: string;
+            /**
+             * Execution Policy
+             * @default REJECT
+             * @enum {string}
+             */
+            execution_policy: "REJECT" | "CANCEL_OTHER";
             /** Expected Approval Version */
             expected_approval_version: number;
             /** Feedback */
@@ -718,6 +803,17 @@ export interface components {
             file_id: string;
             /** Position */
             position: number;
+        };
+        /** AuthConfigResponse */
+        AuthConfigResponse: {
+            /** Sms Code Length */
+            sms_code_length: number;
+            /** Sms Code Ttl Seconds */
+            sms_code_ttl_seconds: number;
+            /** Sms Resend Seconds */
+            sms_resend_seconds: number;
+            /** Sms Verification Enabled */
+            sms_verification_enabled: boolean;
         };
         /** AvailabilityRequest */
         AvailabilityRequest: {
@@ -868,24 +964,15 @@ export interface components {
             /** Name */
             name: string;
         };
-        /**
-         * CreateConversationRequest
-         * @description 创建一个用户可见会话；专业入口只接受公开稳定 code。
-         */
-        CreateConversationRequest: {
+        /** ConversationTransitionResponse */
+        ConversationTransitionResponse: {
+            /** Archived Conversation Id */
+            archived_conversation_id?: string | null;
             /**
-             * Client Conversation Id
-             * Format: uuid
+             * Kind
+             * @enum {string}
              */
-            client_conversation_id: string;
-            /**
-             * Schema Version
-             * @default 1.0
-             * @constant
-             */
-            schema_version: "1.0";
-            /** Specialist Code */
-            specialist_code?: string | null;
+            kind: "CONTINUED" | "CREATED" | "RESUMED";
         };
         /** DeleteAccountRequest */
         DeleteAccountRequest: {
@@ -973,6 +1060,49 @@ export interface components {
             /** Status */
             status: string;
         };
+        /** PhoneLoginRequest */
+        PhoneLoginRequest: {
+            consent: components["schemas"]["ConsentInput"];
+            /** Device Id */
+            device_id: string;
+            /** Phone */
+            phone: string;
+            /**
+             * Schema Version
+             * @default 1.0
+             * @constant
+             */
+            schema_version: "1.0";
+            /** Verification Challenge Id */
+            verification_challenge_id?: string | null;
+            /** Verification Code */
+            verification_code?: string | null;
+        };
+        /** PhoneVerificationCodeRequest */
+        PhoneVerificationCodeRequest: {
+            /** Device Id */
+            device_id: string;
+            /** Phone */
+            phone: string;
+            /**
+             * Schema Version
+             * @default 1.0
+             * @constant
+             */
+            schema_version: "1.0";
+        };
+        /** PhoneVerificationCodeResponse */
+        PhoneVerificationCodeResponse: {
+            /**
+             * Challenge Id
+             * Format: uuid
+             */
+            challenge_id: string;
+            /** Expires In */
+            expires_in: number;
+            /** Resend After */
+            resend_after: number;
+        };
         /** PreferencesRequest */
         PreferencesRequest: {
             /** Expected Version */
@@ -1048,6 +1178,12 @@ export interface components {
         };
         /** RetryRunRequest */
         RetryRunRequest: {
+            /**
+             * Execution Policy
+             * @default REJECT
+             * @enum {string}
+             */
+            execution_policy: "REJECT" | "CANCEL_OTHER";
             /** Expected Attempt */
             expected_attempt: number;
             /**
@@ -1095,12 +1231,28 @@ export interface components {
              */
             content: string;
             /**
+             * Context Policy
+             * @default AUTO
+             * @enum {string}
+             */
+            context_policy: "AUTO" | "CONTINUE_CURRENT" | "ARCHIVE_AND_START";
+            /**
+             * Execution Policy
+             * @default REJECT
+             * @enum {string}
+             */
+            execution_policy: "REJECT" | "CANCEL_OTHER";
+            /**
              * Schema Version
              * @default 1.0
              * @constant
              */
             schema_version: "1.0";
             selection?: components["schemas"]["SelectionInput"] | null;
+            /** Specialist Code */
+            specialist_code?: string | null;
+            /** Target Conversation Id */
+            target_conversation_id?: string | null;
         };
         /** SendMessageResponse */
         SendMessageResponse: {
@@ -1117,6 +1269,7 @@ export interface components {
              */
             schema_version: "1.0";
             stream: components["schemas"]["RunStreamResponse"];
+            transition: components["schemas"]["ConversationTransitionResponse"];
             user_message: components["schemas"]["AcceptedMessageResponse"];
         };
         /** TaskExecutionRequest */
@@ -1147,6 +1300,24 @@ export interface components {
              * @constant
              */
             schema_version: "1.0";
+        };
+        /** TokenResponse */
+        TokenResponse: {
+            /** Access Token */
+            access_token: string;
+            /** Expires In */
+            expires_in: number;
+            /** Refresh Expires In */
+            refresh_expires_in: number;
+            /** Refresh Token */
+            refresh_token: string;
+            /**
+             * Token Type
+             * @default Bearer
+             * @constant
+             */
+            token_type: "Bearer";
+            user: components["schemas"]["UserResponse"];
         };
         /** UnreadyResponse */
         UnreadyResponse: {
@@ -1194,6 +1365,31 @@ export interface components {
             /** Size Bytes */
             size_bytes: number;
         };
+        /** UserResponse */
+        UserResponse: {
+            /** Avatar Url */
+            avatar_url?: string | null;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /** Is New User */
+            is_new_user?: boolean | null;
+            /** Locale */
+            locale: string;
+            /** Nickname */
+            nickname: string | null;
+            /** Status */
+            status: string;
+            /** Timezone */
+            timezone: string;
+        };
         /** ValidationError */
         ValidationError: {
             /** Context */
@@ -1214,6 +1410,8 @@ export interface components {
             device_id: string;
             /** Login Code */
             login_code: string;
+            /** Phone Code */
+            phone_code: string;
             /**
              * Provider
              * @default WECHAT_MINIAPP
@@ -1525,6 +1723,26 @@ export interface operations {
             };
         };
     };
+    auth_config_v1_auth_config_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AuthConfigResponse"];
+                };
+            };
+        };
+    };
     logout_v1_auth_logout_post: {
         parameters: {
             query?: never;
@@ -1546,6 +1764,76 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    phone_login_v1_auth_phone_login_post: {
+        parameters: {
+            query?: never;
+            header: {
+                "Idempotency-Key": string;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PhoneLoginRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TokenResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    send_phone_verification_code_v1_auth_phone_verification_codes_post: {
+        parameters: {
+            query?: never;
+            header: {
+                "Idempotency-Key": string;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PhoneVerificationCodeRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PhoneVerificationCodeResponse"];
+                };
             };
             /** @description Validation Error */
             422: {
@@ -1614,9 +1902,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["TokenResponse"];
                 };
             };
             /** @description Validation Error */
@@ -1697,41 +1983,6 @@ export interface operations {
             };
         };
     };
-    create_conversation_v1_conversations_post: {
-        parameters: {
-            query?: never;
-            header?: {
-                authorization?: string | null;
-            };
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["CreateConversationRequest"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            201: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ConversationResponse"];
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
     conversation_v1_conversations__conversation_id__get: {
         parameters: {
             query?: never;
@@ -1753,6 +2004,38 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["ConversationResponse"];
                 };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    delete_conversation_v1_conversations__conversation_id__delete: {
+        parameters: {
+            query?: never;
+            header: {
+                "Idempotency-Key": string;
+                authorization?: string | null;
+            };
+            path: {
+                conversation_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             /** @description Validation Error */
             422: {
@@ -1788,43 +2071,6 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["MessageListResponse"];
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    send_message_v1_conversations__conversation_id__messages_post: {
-        parameters: {
-            query?: never;
-            header?: {
-                authorization?: string | null;
-            };
-            path: {
-                conversation_id: string;
-            };
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["SendMessageRequest"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            202: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["SendMessageResponse"];
                 };
             };
             /** @description Validation Error */
@@ -2462,6 +2708,41 @@ export interface operations {
                     "application/json": {
                         [key: string]: unknown;
                     };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    send_message_v1_messages_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SendMessageRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SendMessageResponse"];
                 };
             };
             /** @description Validation Error */

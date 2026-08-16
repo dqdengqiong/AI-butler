@@ -20,8 +20,39 @@ class ConsentInput(BaseModel):
 class WechatLoginRequest(BaseModel):
     schema_version: Literal["1.0"] = "1.0"
     login_code: NonEmpty
+    phone_code: NonEmpty
     provider: Literal["WECHAT_MINIAPP", "WECHAT_MOCK"] = "WECHAT_MINIAPP"
     device_id: Annotated[str, StringConstraints(max_length=128)]
+    consent: ConsentInput
+
+
+class AuthConfigResponse(BaseModel):
+    sms_verification_enabled: bool
+    sms_code_length: int = Field(ge=4, le=8)
+    sms_code_ttl_seconds: int = Field(ge=60, le=900)
+    sms_resend_seconds: int = Field(ge=10, le=300)
+
+
+class PhoneVerificationCodeRequest(BaseModel):
+    schema_version: Literal["1.0"] = "1.0"
+    phone: Annotated[str, StringConstraints(strip_whitespace=True, min_length=11, max_length=14)]
+    device_id: Annotated[str, StringConstraints(min_length=1, max_length=128)]
+
+
+class PhoneVerificationCodeResponse(BaseModel):
+    challenge_id: UUID
+    expires_in: int
+    resend_after: int
+
+
+class PhoneLoginRequest(BaseModel):
+    schema_version: Literal["1.0"] = "1.0"
+    phone: Annotated[str, StringConstraints(strip_whitespace=True, min_length=11, max_length=14)]
+    verification_challenge_id: UUID | None = None
+    verification_code: Annotated[
+        str | None, StringConstraints(strip_whitespace=True, max_length=8)
+    ] = None
+    device_id: Annotated[str, StringConstraints(min_length=1, max_length=128)]
     consent: ConsentInput
 
 
@@ -129,17 +160,13 @@ class SelectionInput(BaseModel):
     selected_option_ids: list[NonEmpty] = Field(min_length=1, max_length=10)
 
 
-class CreateConversationRequest(BaseModel):
-    """创建一个用户可见会话；专业入口只接受公开稳定 code。"""
-
-    schema_version: Literal["1.0"] = "1.0"
-    client_conversation_id: UUID
-    specialist_code: Annotated[str | None, StringConstraints(max_length=64)] = None
-
-
 class SendMessageRequest(BaseModel):
     schema_version: Literal["1.0"] = "1.0"
     client_message_id: Annotated[str, StringConstraints(min_length=8, max_length=128)]
+    target_conversation_id: UUID | None = None
+    specialist_code: Annotated[str | None, StringConstraints(max_length=64)] = None
+    context_policy: Literal["AUTO", "CONTINUE_CURRENT", "ARCHIVE_AND_START"] = "AUTO"
+    execution_policy: Literal["REJECT", "CANCEL_OTHER"] = "REJECT"
     content: Annotated[str, StringConstraints(max_length=20_000)] = ""
     attachments: list[AttachmentInput] = Field(default_factory=list, max_length=9)
     selection: SelectionInput | None = None
@@ -239,9 +266,15 @@ class RunStreamResponse(BaseModel):
     last_sequence: int
 
 
+class ConversationTransitionResponse(BaseModel):
+    kind: Literal["CONTINUED", "CREATED", "RESUMED"]
+    archived_conversation_id: UUID | None = None
+
+
 class SendMessageResponse(BaseModel):
     schema_version: Literal["1.0"]
     conversation_id: UUID
+    transition: ConversationTransitionResponse
     user_message: AcceptedMessageResponse
     assistant_message: AcceptedMessageResponse
     run: AcceptedRunResponse
@@ -251,6 +284,7 @@ class SendMessageResponse(BaseModel):
 class RetryRunRequest(BaseModel):
     schema_version: Literal["1.0"] = "1.0"
     expected_attempt: int = Field(ge=0)
+    execution_policy: Literal["REJECT", "CANCEL_OTHER"] = "REJECT"
 
 
 class ApprovalDecisionRequest(BaseModel):
@@ -259,6 +293,7 @@ class ApprovalDecisionRequest(BaseModel):
     expected_approval_version: int = Field(ge=1)
     action: Literal["APPROVE", "EDIT", "REJECT"]
     feedback: Annotated[str | None, StringConstraints(max_length=4000)] = None
+    execution_policy: Literal["REJECT", "CANCEL_OTHER"] = "REJECT"
 
     @model_validator(mode="after")
     def require_edit_feedback(self) -> ApprovalDecisionRequest:

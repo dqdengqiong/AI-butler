@@ -1,7 +1,12 @@
 import { computed, ref } from 'vue'
 import { defineStore } from 'pinia'
 
-import { butlerApi, type ApiObject } from '@/api/butler'
+import {
+  butlerApi,
+  type ApiObject,
+  type AuthConfigResponse,
+  type PhoneVerificationCodeResponse,
+} from '@/api/butler'
 import { credentialStorage } from '@/platform/storage'
 
 export interface CurrentUser {
@@ -22,24 +27,9 @@ function userField(object: ApiObject): CurrentUser {
   const user = value as ApiObject
   return {
     id: stringField(user, 'id'),
-    nickname: typeof user.nickname === 'string' ? user.nickname : '微信用户',
+    nickname: typeof user.nickname === 'string' ? user.nickname : '用户',
     timezone: typeof user.timezone === 'string' ? user.timezone : 'Asia/Shanghai',
   }
-}
-
-function loginCode(deviceId: string): Promise<string> {
-  return new Promise((resolve, reject) => {
-    // #ifdef MP-WEIXIN
-    uni.login({
-      provider: 'weixin',
-      success: (result) => resolve(result.code),
-      fail: () => reject(new Error('微信登录授权失败')),
-    })
-    // #endif
-    // #ifndef MP-WEIXIN
-    resolve(`h5-mock-${deviceId}`)
-    // #endif
-  })
 }
 
 /**
@@ -50,6 +40,9 @@ export const useAuthStore = defineStore('auth', () => {
   const accessToken = ref<string | null>(null)
   const user = ref<CurrentUser | null>(null)
   const restoring = ref(false)
+  const authConfig = ref<AuthConfigResponse | null>(null)
+  const configLoading = ref(false)
+  const configError = ref<string | null>(null)
 
   const authenticated = computed(() => accessToken.value !== null && user.value !== null)
 
@@ -65,20 +58,62 @@ export const useAuthStore = defineStore('auth', () => {
     user.value = userField(response)
   }
 
-  async function login(): Promise<void> {
-    const deviceId = credentialStorage.getDeviceId()
-    const code = await loginCode(deviceId)
+  async function loadConfig(): Promise<void> {
+    configLoading.value = true
+    configError.value = null
+    try {
+      authConfig.value = await butlerApi.authConfig()
+    } catch (error) {
+      authConfig.value = null
+      configError.value = error instanceof Error ? error.message : '登录配置加载失败'
+      throw error
+    } finally {
+      configLoading.value = false
+    }
+  }
+
+  function consent() {
     const now = new Date().toISOString()
-    const response = await butlerApi.login({
+    return {
+      terms_version: '2026-08-01',
+      privacy_version: '2026-08-01',
+      accepted_at: now,
+    }
+  }
+
+  async function sendPhoneVerificationCode(phone: string): Promise<PhoneVerificationCodeResponse> {
+    return butlerApi.sendPhoneVerificationCode({
       schema_version: '1.0',
-      login_code: code,
-      provider: 'WECHAT_MINIAPP',
+      phone,
+      device_id: credentialStorage.getDeviceId(),
+    })
+  }
+
+  async function loginWithPhone(
+    phone: string,
+    challengeId?: string,
+    verificationCode?: string,
+  ): Promise<void> {
+    const deviceId = credentialStorage.getDeviceId()
+    const response = await butlerApi.phoneLogin({
+      schema_version: '1.0',
+      phone,
       device_id: deviceId,
-      consent: {
-        terms_version: '2026-08-01',
-        privacy_version: '2026-08-01',
-        accepted_at: now,
-      },
+      verification_challenge_id: challengeId,
+      verification_code: verificationCode,
+      consent: consent(),
+    })
+    applyTokens(response)
+  }
+
+  async function loginWithWechat(loginCode: string, phoneCode: string): Promise<void> {
+    const response = await butlerApi.wechatLogin({
+      schema_version: '1.0',
+      login_code: loginCode,
+      phone_code: phoneCode,
+      provider: 'WECHAT_MINIAPP',
+      device_id: credentialStorage.getDeviceId(),
+      consent: consent(),
     })
     applyTokens(response)
   }
@@ -128,9 +163,15 @@ export const useAuthStore = defineStore('auth', () => {
     accessToken,
     user,
     restoring,
+    authConfig,
+    configLoading,
+    configError,
     authenticated,
     setAccessToken,
-    login,
+    loadConfig,
+    sendPhoneVerificationCode,
+    loginWithPhone,
+    loginWithWechat,
     restore,
     logout,
     clear,

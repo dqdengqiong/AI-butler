@@ -206,7 +206,11 @@ def test_normalizer_rejects_invalid_days_duplicate_defaults_and_empty_input() ->
 
 def test_llm_builder_fails_closed_for_unknown_provider() -> None:
     real = ButlerService._build_llm(
-        Settings(llm_provider="openai-compatible", llm_api_key="test-key", chat_model="test-model")
+        Settings(
+            llm_provider="openai-compatible",
+            llm_api_key="test-key",  # pragma: allowlist secret
+            chat_model="test-model",
+        )
     )
     assert isinstance(real, OpenAICompatibleLLM)
     with pytest.raises(ValueError, match="unsupported llm provider"):

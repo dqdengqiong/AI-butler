@@ -1,11 +1,12 @@
 import type { components } from './generated/schema'
 import { request } from './client'
 
-type LoginRequest = components['schemas']['WechatLoginRequest']
+type WechatLoginRequest = components['schemas']['WechatLoginRequest']
+type PhoneLoginRequest = components['schemas']['PhoneLoginRequest']
+type PhoneVerificationCodeRequest = components['schemas']['PhoneVerificationCodeRequest']
 type RefreshRequest = components['schemas']['RefreshRequest']
 type LogoutRequest = components['schemas']['LogoutRequest']
 type SendMessageRequest = components['schemas']['SendMessageRequest']
-type CreateConversationRequest = components['schemas']['CreateConversationRequest']
 type ApprovalRequest = components['schemas']['ApprovalDecisionRequest']
 type TaskExecutionRequest = components['schemas']['TaskExecutionRequest']
 type PreferencesRequest = components['schemas']['PreferencesRequest']
@@ -19,6 +20,8 @@ export type ConversationListResponse = components['schemas']['ConversationListRe
 export type MessageListResponse = components['schemas']['MessageListResponse']
 export type MessageResponse = components['schemas']['MessageResponse']
 export type SendMessageResponse = components['schemas']['SendMessageResponse']
+export type AuthConfigResponse = components['schemas']['AuthConfigResponse']
+export type PhoneVerificationCodeResponse = components['schemas']['PhoneVerificationCodeResponse']
 
 export type ApiObject = Record<string, unknown>
 
@@ -27,7 +30,28 @@ function idempotencyKey(prefix: string): string {
 }
 
 export const butlerApi = {
-  login(payload: LoginRequest): Promise<ApiObject> {
+  authConfig(): Promise<AuthConfigResponse> {
+    return request({ path: '/v1/auth/config' })
+  },
+  sendPhoneVerificationCode(
+    payload: PhoneVerificationCodeRequest,
+  ): Promise<PhoneVerificationCodeResponse> {
+    return request({
+      path: '/v1/auth/phone/verification-codes',
+      method: 'POST',
+      data: payload,
+      headers: { 'Idempotency-Key': idempotencyKey('phone-code') },
+    })
+  },
+  phoneLogin(payload: PhoneLoginRequest): Promise<ApiObject> {
+    return request({
+      path: '/v1/auth/phone/login',
+      method: 'POST',
+      data: payload,
+      headers: { 'Idempotency-Key': idempotencyKey('phone-login') },
+    })
+  },
+  wechatLogin(payload: WechatLoginRequest): Promise<ApiObject> {
     return request({
       path: '/v1/auth/wechat/login',
       method: 'POST',
@@ -75,16 +99,18 @@ export const butlerApi = {
     const query = cursor ? `?limit=50&cursor=${encodeURIComponent(cursor)}` : '?limit=50'
     return request({ path: `/v1/conversations${query}`, accessToken })
   },
-  createConversation(
-    payload: CreateConversationRequest,
-    accessToken: string,
-  ): Promise<ConversationResponse> {
-    return request({ path: '/v1/conversations', method: 'POST', data: payload, accessToken })
-  },
   conversation(conversationId: string, accessToken: string): Promise<ConversationResponse> {
     return request({
       path: `/v1/conversations/${encodeURIComponent(conversationId)}`,
       accessToken,
+    })
+  },
+  deleteConversation(conversationId: string, accessToken: string): Promise<void> {
+    return request({
+      path: `/v1/conversations/${encodeURIComponent(conversationId)}`,
+      method: 'DELETE',
+      accessToken,
+      headers: { 'Idempotency-Key': idempotencyKey('delete-conversation') },
     })
   },
   messages(
@@ -98,13 +124,9 @@ export const butlerApi = {
       accessToken,
     })
   },
-  sendMessage(
-    conversationId: string,
-    payload: SendMessageRequest,
-    accessToken: string,
-  ): Promise<SendMessageResponse> {
+  sendMessage(payload: SendMessageRequest, accessToken: string): Promise<SendMessageResponse> {
     return request({
-      path: `/v1/conversations/${encodeURIComponent(conversationId)}/messages`,
+      path: '/v1/messages',
       method: 'POST',
       data: payload,
       accessToken,
@@ -112,6 +134,14 @@ export const butlerApi = {
   },
   run(runId: string, accessToken: string): Promise<ApiObject> {
     return request({ path: `/v1/agent-runs/${encodeURIComponent(runId)}`, accessToken })
+  },
+  cancelRun(runId: string, accessToken: string): Promise<ApiObject> {
+    return request({
+      path: `/v1/agent-runs/${encodeURIComponent(runId)}/cancel`,
+      method: 'POST',
+      accessToken,
+      headers: { 'Idempotency-Key': idempotencyKey('cancel-run') },
+    })
   },
   streamTicket(runId: string, accessToken: string): Promise<ApiObject> {
     return request({

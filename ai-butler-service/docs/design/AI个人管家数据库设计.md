@@ -107,6 +107,12 @@ PostgreSQL 是业务事实唯一来源；外围存储失败时通过状态字段
 - `expires_at > created_at`；`REVOKED` 要求 `revoked_at` 非空。
 - 索引：`(user_id, status, expires_at)`。
 
+### 3.3.1 `phone_verification_challenges`
+
+保存登录前的一次性短信挑战。只持久化手机号 HMAC 和验证码 HMAC，不保存明文；状态为
+`PENDING`、`SENT`、`FAILED`、`CONSUMED`、`LOCKED` 或 `EXPIRED`。挑战绑定
+`device_id`，默认五分钟过期、最多校验五次，并按手机号和设备的创建时间索引执行限流。
+
 ### 3.4 `user_profiles`
 
 保存 Profile 节点收集、且用户可查看和修改的规划信息。
@@ -209,6 +215,8 @@ PostgreSQL 是业务事实唯一来源；外围存储失败时通过状态字段
 | `status` | `varchar(16)` | 否 | `CURRENT`、`ARCHIVED` |
 | `specialist_user_agent_id` | `uuid` | 是 | 专业会话固定绑定，普通会话为空 |
 | `archived_at` | `timestamptz` | 是 | 产品会话归档时间 |
+| `archive_reason` | `varchar(32)` | 是 | `TOPIC_SWITCH`、`SPECIALIST_SWITCH`、`HISTORY_RESUME`、`WORKFLOW_EXIT` |
+| `deleted_at` | `timestamptz` | 是 | 用户删除历史会话或系统丢弃空会话的软删除时间 |
 | `active_segment_id` | `uuid` | 是 | 当前 ACTIVE 分段，循环外键后添加 |
 | `latest_handoff_summary_id` | `uuid` | 是 | 最新累计交接摘要，循环外键后添加 |
 | `context_version` | `integer` | 否 | 默认 1，每次线程轮换递增 |
@@ -218,9 +226,10 @@ PostgreSQL 是业务事实唯一来源；外围存储失败时通过状态字段
 
 约束与索引：
 
-- 唯一约束：`(user_id, client_conversation_id)`；部分唯一索引保证每个用户最多一个 `CURRENT`。
+- 唯一约束：`(user_id, client_conversation_id)`；部分唯一索引在 `status = 'CURRENT' AND deleted_at IS NULL` 范围内保证每个用户最多一个可见当前会话，时间线索引仅覆盖 `deleted_at IS NULL` 的可见会话。
 - 产品会话归档不删除消息、摘要或 checkpoint，也不改变内部 segment 状态。
-- 业务层从认证用户解析归属；客户端只能指定公开 `specialist_code`，服务端解析并固定 `specialist_user_agent_id`。
+- 用户删除仅允许 `ARCHIVED` 会话；系统切换会话时可软删除不存在 `USER` 消息的空 `CURRENT` 会话。普通列表、详情、消息与发送查询必须排除 `deleted_at IS NOT NULL`，历史列表还必须排除没有 `USER` 消息的异常 `ARCHIVED` 数据。
+- 业务层从认证用户解析归属；客户端只能指定公开 `specialist_code`，服务端解析并固定 `specialist_user_agent_id`。`client_conversation_id` 由服务端自动场景创建时生成，客户端不再调用手动创建 API。
 
 ### 5.2 `conversation_segments`
 
@@ -301,7 +310,7 @@ PostgreSQL 是业务事实唯一来源；外围存储失败时通过状态字段
 - `ASSISTANT` 消息初始以空 `content` 和 `PENDING` 创建，可迁移为 `STREAMING`，最终必须进入 `COMPLETED`、`FAILED` 或 `CANCELLED`。
 - 只有显式重试 `FAILED_RETRYABLE` run 时，当前 `FAILED` Assistant 消息可以回到 `PENDING`；必须增加 attempt，并在已有部分输出时写 `message.reset`。
 - `SYSTEM_EVENT` 必须为 `COMPLETED`。
-- 部分唯一索引：`(conversation_id, client_message_id)`，仅非空时生效。
+- 部分唯一索引：`(user_id, client_message_id)`，仅非空时生效，确保自动路由重试不会重复创建会话或消息。
 - 业务层验证 segment 属于同一 conversation；归档不改变消息的 segment 或展示顺序。
 - 索引：`(conversation_id, created_at, id)`、`(segment_id, created_at, id)`、`(user_id, created_at DESC)`、`agent_run_id`。
 
@@ -377,7 +386,7 @@ PostgreSQL 是业务事实唯一来源；外围存储失败时通过状态字段
 - 终态 `SUCCEEDED`、`FAILED_FINAL`、`CANCELLED` 要求 `completed_at` 非空。
 - `CANCEL_REQUESTED` 要求 `cancel_requested_at` 非空。
 - 部分唯一索引：`conversation_id`，仅状态为 `QUEUED`、`RUNNING`、`AWAITING_INPUT`、`AWAITING_APPROVAL`、`FAILED_RETRYABLE`、`CANCEL_REQUESTED` 时生效，保证一个会话最多一个活动 run。
-- 相同状态集合还对 `user_id` 建部分唯一索引，保证用户全局最多一个非终态 run；新建、恢复或跨会话发送前均检查该约束。
+- `user_id` 部分唯一索引只覆盖 `QUEUED`、`RUNNING`、`CANCEL_REQUESTED`，保证用户全局最多一个真正执行中的 run；等待输入、待审批和待重试可跨会话并存。
 - Worker 领取索引：`(status, lease_expires_at, created_at)`；查询仍需使用 `FOR UPDATE SKIP LOCKED`。
 - 查询索引：`(user_id, created_at DESC)`、`(conversation_id, created_at DESC)`、`(segment_id, created_at DESC)`、`(status, updated_at)`、`trace_id`。
 - 添加 `messages.agent_run_id` → `agent_runs.id` 外键，删除时设空。
@@ -1024,7 +1033,7 @@ Worker、进程内 facade 和未来 MCP Server 都通过 `run_id` 重新加载�
 发送消息事务按以下顺序执行：
 
 1. 以 `user_id` 锁用户行，再按固定顺序锁定当前/目标会话及目标 ACTIVE segment。
-2. 查询 `(conversation_id, client_message_id)`；已存在则返回原消息、run 和最新 sequence。
+2. 查询 `(user_id, client_message_id)`；已存在则返回原会话、消息、run 和最新 sequence。
 3. 查询活动 run。不存在则创建新 run；`AWAITING_INPUT` 则准备恢复同一 run；其他活动状态返回对应 `409`。
 4. 插入 User 消息和本轮 Assistant 占位消息，二者绑定当前 segment；同时创建幂等 `memory_extraction_jobs(EXTRACT)`。
 5. 创建或更新 run 的 `pending_action`、稳定 `pending_action_key`、`pending_message_id` 和 `pending_response_message_id`。
