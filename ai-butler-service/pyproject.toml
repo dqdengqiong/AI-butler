@@ -63,7 +63,7 @@ ignore = ["S101", "RUF001", "RUF002", "RUF003"]
 
 [tool.ruff.lint.per-file-ignores]
 "migrations/versions/*.py" = ["E501"]
-"src/ai_butler/application/butler.py" = ["E501"]
+"src/ai_butler/application/butler/*.py" = ["E501"]
 "src/ai_butler/api/routers/*.py" = ["B008"]
 "src/ai_butler/config.py" = ["S105"]
 "src/ai_butler/api/schemas.py" = ["S105"]

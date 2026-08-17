@@ -57,6 +57,7 @@ format:
 lint:
 	uv run ruff format --check src tests scripts
 	uv run ruff check src tests scripts
+	uv run python scripts/check_source_lines.py --max-lines 500 src
 
 typecheck:
 	uv run mypy
