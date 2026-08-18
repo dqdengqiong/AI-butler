@@ -231,12 +231,53 @@ class ConversationListResponse(BaseModel):
     has_more: bool
 
 
+class PlanCardPlanV11(BaseModel):
+    work_item_id: str
+    plan_id: UUID
+    plan_revision_id: UUID
+    title: str
+    objective_summary: str
+    weekly_minutes: int = Field(gt=0)
+
+
+class PlanCardPayloadV11(BaseModel):
+    mode: Literal["SINGLE_PLAN_CREATE", "SINGLE_PLAN_ADJUST", "BUNDLE_CREATE"]
+    title: str
+    plans: list[PlanCardPlanV11]
+    total_weekly_minutes: int = Field(gt=0)
+    available_weekly_minutes: int = Field(gt=0)
+    warnings: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_mode_cardinality(self) -> PlanCardPayloadV11:
+        if self.mode == "BUNDLE_CREATE" and len(self.plans) < 2:
+            raise ValueError("BUNDLE_CREATE requires at least two plans")
+        if self.mode == "SINGLE_PLAN_ADJUST" and len(self.plans) != 1:
+            raise ValueError("SINGLE_PLAN_ADJUST requires exactly one plan")
+        return self
+
+
+class PlanCardV11(BaseModel):
+    """新输出计划卡；MessageResponse 仍允许历史 1.0 与未知卡片只读透传。"""
+
+    schema_version: Literal["1.1"]
+    card_id: UUID
+    card_type: Literal["PlanCard"]
+    entity_refs: dict[str, object]
+    payload: PlanCardPayloadV11
+    actions: list[dict[str, object]]
+
+
+class CardCollection(BaseModel):
+    cards: list[PlanCardV11 | dict[str, object]] = Field(default_factory=list)
+
+
 class MessageResponse(BaseModel):
     id: UUID
     role: Literal["USER", "ASSISTANT", "SYSTEM_EVENT"]
     status: str
     content: str
-    cards: dict[str, object]
+    cards: CardCollection
     agent_run_id: UUID | None
     created_at: datetime
 

@@ -29,6 +29,7 @@ const emit = defineEmits<{
   submitSelection: [itemKey: string]
   approvePlan: [item: PlanChatItem]
   editPlan: [item: PlanChatItem]
+  rejectPlan: [item: PlanChatItem]
   openSource: [citationId: string]
   selectAgent: [agentCode: AgentShortcutCode]
 }>()
@@ -60,6 +61,7 @@ const activeAgent = computed(() =>
         @submit-selection="(key) => emit('submitSelection', key)"
         @approve-plan="(item) => emit('approvePlan', item)"
         @edit-plan="(item) => emit('editPlan', item)"
+        @reject-plan="(item) => emit('rejectPlan', item)"
         @open-source="(citationId) => emit('openSource', citationId)"
       />
     </scroll-view>

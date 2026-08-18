@@ -59,7 +59,7 @@ class RunService:
                 "status": run["status"],
                 "attempt": run["attempt"],
                 "last_sequence": run["last_event_sequence"],
-                "response_message": {"id": run["response_message_id"]},
+                "response_message": {"id": run["pending_response_message_id"]},
                 "data": {},
                 "citations": [],
                 "warnings": [],
@@ -100,7 +100,8 @@ class RunService:
                     await connection.execute(
                         text(
                             "SELECT event_type,sequence,attempt,payload,created_at FROM agent_run_events "
-                            "WHERE run_id=:run_id AND user_id=:user_id AND sequence>:after ORDER BY sequence LIMIT 100"
+                            "WHERE agent_run_id=:run_id AND user_id=:user_id "
+                            "AND sequence>:after ORDER BY sequence LIMIT 100"
                         ),
                         {"run_id": run_id, "user_id": user_id, "after": after},
                     )
@@ -145,7 +146,7 @@ class RunService:
             if status == "CANCELLED":
                 await connection.execute(
                     text("UPDATE messages SET status='CANCELLED' WHERE id=:id"),
-                    {"id": run["response_message_id"]},
+                    {"id": run["pending_response_message_id"]},
                 )
                 await self._append_event(
                     connection, run_id, user_id, "run.cancelled", {}, run["attempt"]
@@ -247,7 +248,8 @@ class RunService:
                 (
                     await connection.execute(
                         text(
-                            "SELECT * FROM approval_decision_items WHERE approval_id=:id FOR UPDATE"
+                            "SELECT * FROM approval_decision_items WHERE approval_id=:id "
+                            "ORDER BY plan_id FOR UPDATE"
                         ),
                         {"id": approval_id},
                     )
@@ -268,6 +270,15 @@ class RunService:
                         raise conflict("PLAN_REVISION_CONFLICT", "计划版本已更新，请重新生成草案")
                 for item in items:
                     await self._publish_revision(connection, user_id, dict(item))
+            elif request.action == "REJECT":
+                await connection.execute(
+                    text(
+                        "UPDATE plan_revisions SET status='REJECTED' WHERE id IN ("
+                        "SELECT plan_revision_id FROM approval_decision_items WHERE approval_id=:id) "
+                        "AND status='PENDING_APPROVAL'"
+                    ),
+                    {"id": approval_id},
+                )
             terminal = "APPROVED" if request.action == "APPROVE" else request.action + "ED"
             await connection.execute(
                 text(

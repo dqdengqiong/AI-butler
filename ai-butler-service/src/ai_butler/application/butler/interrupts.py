@@ -73,7 +73,11 @@ class InterruptionService:
                 "UPDATE messages SET status='COMPLETED',content=:content,structured_content=CAST(:cards AS jsonb),"
                 "updated_at=now() WHERE id=:id"
             ),
-            {"content": content, "cards": _json(card), "id": run["response_message_id"]},
+            {
+                "content": content,
+                "cards": _json(card),
+                "id": run["pending_response_message_id"],
+            },
         )
         await connection.execute(
             text("UPDATE agent_runs SET status='AWAITING_INPUT',updated_at=now() WHERE id=:id"),
@@ -184,7 +188,11 @@ class InterruptionService:
                 "UPDATE messages SET status='COMPLETED',content=:content,"
                 "structured_content=CAST(:cards AS jsonb),updated_at=now() WHERE id=:id"
             ),
-            {"content": content, "cards": _json(card), "id": run["response_message_id"]},
+            {
+                "content": content,
+                "cards": _json(card),
+                "id": run["pending_response_message_id"],
+            },
         )
         await connection.execute(
             text("UPDATE agent_runs SET status='AWAITING_INPUT',updated_at=now() WHERE id=:id"),

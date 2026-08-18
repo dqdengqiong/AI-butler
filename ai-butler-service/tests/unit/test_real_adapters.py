@@ -101,8 +101,16 @@ class _OpenAIClient:
                 ),
             )
 
-        async def create_embedding(**_kwargs: object) -> object:
-            return SimpleNamespace(data=[SimpleNamespace(embedding=[0.1, 0.2])])
+        async def create_embedding(**kwargs: object) -> object:
+            inputs = kwargs.get("input")
+            count = len(inputs) if isinstance(inputs, list) else 1
+            return SimpleNamespace(
+                data=[
+                    SimpleNamespace(index=index, embedding=[0.1 + index, 0.2 + index])
+                    for index in range(count)
+                ],
+                usage=SimpleNamespace(prompt_tokens=count),
+            )
 
         async def create_response(**_kwargs: object) -> object:
             if error:
@@ -155,6 +163,10 @@ async def test_openai_compatible_chat_and_embedding(monkeypatch: pytest.MonkeyPa
     assert response.cached_input_tokens == 3
     embedding = OpenAICompatibleEmbeddingProvider("key", "https://provider", "embed", 2)
     assert await embedding.embed("input") == [0.1, 0.2]
+    assert await embedding.embed_many(("first", "second")) == (
+        [0.1, 0.2],
+        [1.1, 1.2],
+    )
     assert [options["max_retries"] for options in client_options] == [0, 0]
 
     doubao = OpenAICompatibleLLM(

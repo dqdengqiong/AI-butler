@@ -1,15 +1,15 @@
-# AI个人管家接口设计文档 V1.0
+# AI个人管家接口设计文档 V3.0
 
 ## 1. 文档目标
 
 本文基于以下输入定义 AI 个人管家 MVP 的客户端—服务端接口契约：
 
 - 《AI个人管家·可点击原型 V10（单计划调整）》
-- [《AI个人管家数据库设计文档 V2.4》](./AI个人管家数据库设计.md)
-- [《AI个人管家系统详细设计文档 V2.4》](./AI个人管家系统详细设计.md)
-- [《AI个人管家聊天系统设计文档 V2.4》](./AI个人管家聊天系统设计.md)
+- [《AI个人管家数据库设计文档》](./AI个人管家数据库设计.md)
+- [《AI个人管家系统详细设计文档》](./AI个人管家系统详细设计.md)
+- [《AI个人管家聊天系统设计文档》](./AI个人管家聊天系统设计.md)
 
-本文是目标接口设计，不代表当前接口已经实现。当前仓库 OpenAPI 仅包含健康检查；进入开发后应先按本文维护后端 OpenAPI，再生成前端客户端。
+本文描述当前已实现的 `/v1` 契约。后端 OpenAPI 1.1.0 是唯一接口来源；接口变更必须先更新后端 Schema 和 `openapi.json`，再同步前端生成类型与客户端。
 
 MVP 重点覆盖：
 
@@ -441,6 +441,8 @@ Idempotency-Key: 0190...
 
 服务端立即将用户置为不可登录并撤销会话，随后停止 run/通知，清理 Checkpointer、Store、Qdrant、对象存储和 PostgreSQL 用户数据。若需要保留账号但清除业务数据，必须先补充独立删除作业模型、范围和恢复策略，不能复用账号删除接口。
 
+删除由 `account_deletion_jobs` 按 `CANCEL_WORK → CHECKPOINT → STORE → QDRANT → OBJECTS → BUSINESS` 可恢复推进。任一步失败时返回的账号状态仍为 `DELETING`，已有 access/refresh token 均不可继续访问；成功后只保留脱敏墓碑和作业结果。
+
 ## 7. 首页、计划与任务接口
 
 ### 7.1 首页聚合
@@ -585,7 +587,7 @@ POST /v1/tasks/{task_id}/executions
 
 ```json
 {
-  "schema_version": "1.0",
+  "schema_version": "1.1",
   "client_execution_id": "0190...",
   "result": "COMPLETED",
   "duration_minutes": 38,
@@ -838,6 +840,7 @@ POST /v1/agent-runs/{run_id}/retry
     "approval_version": 1,
     "items": [
       {
+        "work_item_id": "work-1",
         "plan_id": "uuid",
         "plan_revision_id": "new-revision-uuid",
         "expected_current_revision_id": "current-revision-uuid"
@@ -847,8 +850,18 @@ POST /v1/agent-runs/{run_id}/retry
   "payload": {
     "mode": "SINGLE_PLAN_ADJUST",
     "title": "公务员备考 · 调整后",
-    "plans": [],
-    "unchanged_plan_ids": ["other-plan-uuid"],
+    "plans": [
+      {
+        "work_item_id": "work-1",
+        "plan_id": "uuid",
+        "plan_revision_id": "new-revision-uuid",
+        "title": "公务员备考",
+        "objective_summary": "降低工作日负荷",
+        "weekly_minutes": 300
+      }
+    ],
+    "total_weekly_minutes": 300,
+    "available_weekly_minutes": 420,
     "warnings": []
   },
   "actions": [
@@ -859,11 +872,11 @@ POST /v1/agent-runs/{run_id}/retry
 }
 ```
 
-`SINGLE_PLAN_ADJUST` 必须且只能包含一个审批项。服务端再次校验目标计划属于当前用户且 `expected_current_revision_id` 仍为当前版本。
+`SINGLE_PLAN_ADJUST` 必须且只能包含一个审批项和一个 `plans[]` 元素。服务端再次校验目标计划属于当前用户且 `expected_current_revision_id` 仍为当前版本。
 
 ### 9.3 组合创建卡
 
-组合创建使用 `payload.mode=BUNDLE_CREATE`，每个新计划各有一个 `plan_revision_id`，`expected_current_revision_id=null`。全部 revision 整组批准或整组失败，不允许部分成功。
+组合创建使用 PlanCard 1.1 的 `payload.mode=BUNDLE_CREATE`，`plans[]` 至少两项，每个新计划各有稳定 `work_item_id`、`plan_id` 和 `plan_revision_id`，`expected_current_revision_id=null`。`payload` 同时给出总负荷、可用负荷和 warnings；全部 revision 整组批准或整组失败，不允许部分成功。客户端继续兼容历史 PlanCard 1.0，但服务端不再产生新的 1.0 计划卡。
 
 ### 9.4 提交审批
 
@@ -1165,7 +1178,7 @@ POST chat message
 | 刷新会话 | `auth_sessions` | 只保存刷新令牌 HMAC |
 | 画像/偏好 | `user_profiles` | 画像、提醒 JSON、乐观锁 |
 | 可用时间 | `study_availability` | 默认与每周时间窗 |
-| 主聊天 | `conversations` | 每用户一个 BUTLER 会话 |
+| 当前话题 | `conversations` | 每用户最多一个 CURRENT，可保留多个 ARCHIVED 会话 |
 | 消息 | `messages` | 用户可见消息和卡片 |
 | 附件 | `message_attachments`、`stored_files` | 稳定顺序和文件归属 |
 | Run/SSE | `agent_runs`、`agent_run_events` | 状态、恢复摘要和展示事件 |
@@ -1237,18 +1250,18 @@ POST chat message
 4. 语音在客户端完成转写后作为普通文本发送；不保存原始音频。若需上传语音，需扩展文件 purpose、MIME 和转写作业。
 5. “计划变更需确认”是只读策略；仅在 RAG 实际返回引用时展示 SourceCard。
 
-### 17.2 数据库设计缺口
+### 17.2 已关闭的数据库设计项与剩余扩展点
 
 - 登录接口要求记录用户接受的用户协议和隐私政策版本，但当前数据库没有 consent 审计表或字段。上线前必须补充不可抵赖的同意记录。
-- `DELETE /v1/me` 需要可重试地推进跨 PostgreSQL、LangGraph、Qdrant 和对象存储的删除步骤，当前数据库没有账号删除作业表。实现前应增加删除作业或明确复用通用作业设施。
-- 学习时间整体更新需要集合级版本；当前 `study_availability` 只有行级时间字段，没有集合版本。建议在 `user_profiles` 增加 `availability_version`，或新增用户配置版本表。
-- Citation 必须保存标题、机构、域名、发布时间、检索时间和排序快照，避免来源更新或私有文件删除后改变历史消息编号。
+- 跨存储账号删除已由 `account_deletion_jobs` 表和分步 Scheduler 状态机实现。
+- 学习时间集合级乐观锁已由 `user_profiles.availability_version` 实现。
+- Citation 已保存标题、机构、域名、发布时间、检索时间和排序快照，来源更新或私有文件删除不改变历史编号。
 - 上传完成和安全扫描需要后台作业状态；当前只有文件状态字段，验证阶段可由现有 Worker 扫描，规模扩大后应增加通用作业表。
-- 新 revision 批准后，旧 revision 的未来未执行任务如何取消、迁移或保留需要确定性规则；当前数据库能表达 `CANCELLED`，但详细设计尚未固定转换口径。
+- 新 revision 生效时，从用户时区当天起取消旧 revision 的 `TODO/DOING` 任务；`DONE/SKIPPED/CANCELLED` 和执行记录保持不变。
 
 ## 18. 验收场景
 
-1. 同一手机号通过 H5 或微信登录都解析为同一 UUID，重复请求不会创建多个用户、BUTLER 实例或主聊天。
+1. 同一手机号通过 H5 或微信登录都解析为同一 UUID，重复请求不会创建多个用户或 BUTLER 实例；会话由服务端自动路由且最多一个为 CURRENT。
 2. 空首页返回 `experience_state=EMPTY`，创建首计划只能通过聊天和 PlanCard 审批完成。
 3. 信息不足时同一 run 进入 `AWAITING_INPUT`，补充信息后恢复原 run。
 4. 文本“确认”不会批准计划；只有审批接口会发布 revision。

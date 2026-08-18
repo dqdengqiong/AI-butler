@@ -24,6 +24,27 @@ async def test_fake_llm_returns_valid_structured_content() -> None:
     assert response.prompt_version == "router-v1"
 
 
+async def test_fake_llm_returns_cited_research_answer() -> None:
+    prompt = json.dumps(
+        {
+            "evidence": [
+                {
+                    "ref": "source-1",
+                    "content": "报名截止日期为 2026 年 10 月 8 日。",
+                    "source_type": "WEB",
+                }
+            ]
+        },
+        ensure_ascii=False,
+    )
+    response = await FakeLLM().generate(
+        ModelRequest.user(ModelTask.RESEARCH, "research-answer-v1", prompt)
+    )
+    answer = json.loads(response.content)
+    assert answer["segments"][0]["evidence_refs"] == ["source-1"]
+    assert "2026" in answer["segments"][0]["text"]
+
+
 async def test_fake_llm_can_return_invalid_json() -> None:
     response = await FakeLLM().generate(
         ModelRequest.user(
@@ -66,3 +87,7 @@ async def test_fake_embedding_is_deterministic() -> None:
     second = await provider.embed("public exam")
     assert first == second
     assert len(first) == provider.dimensions
+    assert await provider.embed_many(("public exam", "second")) == (
+        first,
+        await provider.embed("second"),
+    )

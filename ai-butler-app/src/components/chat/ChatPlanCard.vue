@@ -3,7 +3,11 @@ import type { ChatItem } from '@/types/view-models'
 
 type PlanItem = Extract<ChatItem, { kind: 'plan' }>
 defineProps<{ item: PlanItem }>()
-defineEmits<{ approve: [item: PlanItem]; edit: [item: PlanItem] }>()
+defineEmits<{
+  approve: [item: PlanItem]
+  edit: [item: PlanItem]
+  reject: [item: PlanItem]
+}>()
 </script>
 
 <template>
@@ -15,25 +19,36 @@ defineEmits<{ approve: [item: PlanItem]; edit: [item: PlanItem] }>()
       </view>
       <text class="approval-pill" :class="item.status">
         {{
-          item.status === 'approved' ? '已确认' : item.status === 'editing' ? '修改中' : '待确认'
+          item.status === 'approved'
+            ? '已确认'
+            : item.status === 'editing'
+              ? '修改中'
+              : item.status === 'rejected'
+                ? '已拒绝'
+                : '待确认'
         }}
       </text>
     </view>
-    <view class="plan-block">
+    <view v-for="plan in item.plans" :key="plan.key" class="plan-block">
       <view class="plan-block-head"
-        ><text>公务员备考</text
-        ><text>每周 {{ Math.round(item.weeklyMinutes / 6) / 10 }} 小时</text></view
+        ><text>{{ plan.title }}</text
+        ><text>每周 {{ Math.round(plan.weeklyMinutes / 6) / 10 }} 小时</text></view
       >
-      <text class="plan-note">{{ item.description }}</text>
+      <text class="plan-note">{{ plan.description }}</text>
     </view>
+    <text v-for="warning in item.warnings" :key="warning" class="plan-warning">{{ warning }}</text>
     <view v-if="item.status === 'pending'" class="card-actions">
+      <button class="small-button danger" @click="$emit('reject', item)">拒绝</button>
       <button class="small-button secondary" @click="$emit('edit', item)">继续修改</button>
-      <button class="small-button primary" @click="$emit('approve', item)">确认调整</button>
+      <button class="small-button primary" @click="$emit('approve', item)">确认计划</button>
     </view>
     <text v-else-if="item.status === 'approved'" class="plan-result"
       >✓ 调整已确认，任务正在更新</text
     >
-    <text v-else class="plan-result editing">请在输入框中说明希望修改的内容</text>
+    <text v-else-if="item.status === 'editing'" class="plan-result editing"
+      >请在输入框中说明希望修改的内容</text
+    >
+    <text v-else class="plan-result editing">计划已拒绝，不会创建任务</text>
   </view>
 </template>
 
@@ -129,6 +144,17 @@ defineEmits<{ approve: [item: PlanItem]; edit: [item: PlanItem] }>()
 .small-button.secondary {
   color: #413d51;
   background: #f0eef6;
+}
+.small-button.danger {
+  color: #a24444;
+  background: #faeeee;
+}
+.plan-warning {
+  display: block;
+  margin-top: 12rpx;
+  color: #97651f;
+  font-size: 18rpx;
+  line-height: 1.45;
 }
 .plan-result {
   display: block;

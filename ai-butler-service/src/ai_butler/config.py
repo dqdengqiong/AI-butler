@@ -54,6 +54,13 @@ class Settings(BaseSettings):
     search_timeout_seconds: float = 15.0
     search_max_queries: int = 3
     search_max_results: int = 5
+    search_candidate_results: int = 20
+    rag_evidence_max_tokens: int = 4000
+    rag_evidence_max_item_tokens: int = 700
+    rag_token_safety_margin: int = 512
+    rag_embedding_batch_size: int = 32
+    rag_vector_upsert_batch_size: int = 128
+    rag_max_chunks_per_document: int = 1000
     model_routing_enabled: bool = False
     model_shadow_mode: bool = False
     model_routing_file: Path = Path("model-routing.toml")
@@ -81,6 +88,10 @@ class Settings(BaseSettings):
     conversation_topic_confidence: float = 0.85
     event_retention_days: int = 7
     checkpoint_retention_days: int = 7
+    run_trace_retention_days: int = 30
+    memory_audit_retention_days: int = 90
+    memory_preference_ttl_days: int = 180
+    memory_constraint_ttl_days: int = 365
     log_level: str = "INFO"
     tracing_enabled: bool = False
     eval_runner_factories: dict[str, str] = Field(default_factory=dict)
@@ -113,8 +124,32 @@ class Settings(BaseSettings):
             raise ValueError("sms hourly limits must be positive")
         if self.conversation_topic_idle_seconds < 3600:
             raise ValueError("conversation topic idle threshold must be at least one hour")
+        if not 0 < self.context_soft_limit_ratio < self.context_hard_limit_ratio <= 0.95:
+            raise ValueError("context limits must satisfy 0 < soft < hard <= 0.95")
+        retention_days = (
+            self.event_retention_days,
+            self.checkpoint_retention_days,
+            self.run_trace_retention_days,
+            self.memory_audit_retention_days,
+            self.memory_preference_ttl_days,
+            self.memory_constraint_ttl_days,
+        )
+        if any(days < 1 for days in retention_days):
+            raise ValueError("retention and memory TTL values must be positive")
         if not 0.5 <= self.conversation_topic_confidence <= 1:
             raise ValueError("conversation topic confidence must be between 0.5 and 1")
+        if not 1 <= self.search_max_results <= self.search_candidate_results:
+            raise ValueError("search result limits are inconsistent")
+        if self.rag_evidence_max_tokens < 256:
+            raise ValueError("RAG evidence budget must be at least 256 tokens")
+        if not 128 <= self.rag_evidence_max_item_tokens <= self.rag_evidence_max_tokens:
+            raise ValueError("RAG item budget must fit inside the evidence budget")
+        if not 1 <= self.rag_embedding_batch_size <= 128:
+            raise ValueError("RAG embedding batch size must be between 1 and 128")
+        if not 1 <= self.rag_vector_upsert_batch_size <= 512:
+            raise ValueError("RAG vector batch size must be between 1 and 512")
+        if self.rag_max_chunks_per_document < 1:
+            raise ValueError("RAG document chunk limit must be positive")
         if self.model_shadow_mode and not self.model_routing_enabled:
             raise ValueError("model shadow mode requires real model routing")
         if self.model_shadow_mode and self.app_env.lower() in {"production", "staging"}:

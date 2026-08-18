@@ -40,7 +40,7 @@ def create_app(
 
     application = FastAPI(
         title="AI Butler API",
-        version="1.0.0",
+        version="1.1.0",
         description="AI个人管家后端公共 API",
         lifespan=lifespan,
     )

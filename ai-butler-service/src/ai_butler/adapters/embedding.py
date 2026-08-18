@@ -18,6 +18,8 @@ class EmbeddingProvider(Protocol):
 
     async def embed(self, text: str) -> list[float]: ...
 
+    async def embed_many(self, texts: tuple[str, ...]) -> tuple[list[float], ...]: ...
+
 
 class EmbeddingProviderError(RuntimeError):
     """不携带上游正文的向量模型错误。"""
@@ -32,6 +34,12 @@ class FakeEmbeddingProvider:
     async def embed(self, text: str) -> list[float]:
         digest = hashlib.sha256(text.encode("utf-8")).digest()
         return [round((digest[index] / 127.5) - 1.0, 6) for index in range(self.dimensions)]
+
+    async def embed_many(self, texts: tuple[str, ...]) -> tuple[list[float], ...]:
+        embeddings: list[list[float]] = []
+        for text in texts:
+            embeddings.append(await self.embed(text))
+        return tuple(embeddings)
 
 
 class OpenAICompatibleEmbeddingProvider:
@@ -84,6 +92,37 @@ class OpenAICompatibleEmbeddingProvider:
             cached_input_tokens=cached,
         )
         return embedding
+
+    async def embed_many(self, texts: tuple[str, ...]) -> tuple[list[float], ...]:
+        if not texts:
+            return ()
+        started = perf_counter()
+        try:
+            response = await self._client.embeddings.create(
+                model=self.model,
+                input=list(texts),
+                dimensions=self.dimensions,
+            )
+        except Exception as exc:
+            await self._record("FAILED", started, type(exc).__name__)
+            raise EmbeddingProviderError("embedding provider request failed") from exc
+        ordered = sorted(response.data, key=lambda item: item.index)
+        embeddings = tuple(item.embedding for item in ordered)
+        if len(embeddings) != len(texts) or any(
+            len(embedding) != self.dimensions for embedding in embeddings
+        ):
+            await self._record("FAILED", started, "EmbeddingBatchMismatch")
+            raise ValueError("embedding batch mismatch")
+        usage = getattr(response, "usage", None)
+        cached = getattr(getattr(usage, "prompt_tokens_details", None), "cached_tokens", 0) or 0
+        await self._record(
+            "SUCCEEDED",
+            started,
+            None,
+            input_tokens=getattr(usage, "prompt_tokens", 0) or 0,
+            cached_input_tokens=cached,
+        )
+        return embeddings
 
     async def _record(
         self,

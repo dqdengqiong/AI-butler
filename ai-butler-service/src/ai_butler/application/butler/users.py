@@ -217,6 +217,14 @@ class UserService:
                 ),
                 {"user_id": user_id, "now": now},
             )
+            await connection.execute(
+                text(
+                    "INSERT INTO account_deletion_jobs(id,user_id,status,current_step) "
+                    "VALUES(:id,:user_id,'PENDING','CANCEL_WORK') "
+                    "ON CONFLICT(user_id) DO NOTHING"
+                ),
+                {"id": uuid4(), "user_id": user_id},
+            )
         return {"status": "DELETING", "accepted_at": now}
 
     async def list_agent_definitions(self) -> dict[str, object]:

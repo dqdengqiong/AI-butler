@@ -59,19 +59,72 @@ function mapCard(value: ApiObject): ChatItem | null {
   const payload = asObject(value.payload) ?? {}
   const refs = asObject(value.entity_refs) ?? {}
   if (type === 'PlanCard') {
+    const schemaVersion = stringValue(value, 'schema_version')
+    if (schemaVersion !== '1.0' && schemaVersion !== '1.1') {
+      return {
+        key: stringValue(value, 'card_id'),
+        kind: 'status',
+        title: '当前计划卡版本暂不支持',
+        description: '请刷新客户端或在计划页查看服务端已保存的计划。',
+      }
+    }
     const approvalStatus = stringValue(refs, 'approval_status', 'PENDING')
+    const mode = stringValue(payload, 'mode', 'SINGLE_PLAN_ADJUST')
+    const plans =
+      schemaVersion === '1.1'
+        ? asArray(payload.plans).map((plan, index) => ({
+            key: stringValue(plan, 'work_item_id', `plan-${index}`),
+            title: stringValue(plan, 'title', `计划 ${index + 1}`),
+            description: stringValue(plan, 'objective_summary'),
+            weeklyMinutes: numberValue(plan, 'weekly_minutes'),
+          }))
+        : [
+            {
+              key: stringValue(value, 'card_id'),
+              title: stringValue(payload, 'title', '公务员备考计划'),
+              description: stringValue(payload, 'objective_summary'),
+              weeklyMinutes: numberValue(payload, 'weekly_minutes'),
+            },
+          ]
+    // 1.1 的 cardinality 是副作用审批契约的一部分；异常卡片必须只读降级。
+    if (
+      schemaVersion === '1.1' &&
+      ((mode === 'BUNDLE_CREATE' && plans.length < 2) ||
+        (mode === 'SINGLE_PLAN_ADJUST' && plans.length !== 1))
+    ) {
+      return {
+        key: stringValue(value, 'card_id'),
+        kind: 'status',
+        title: '计划草案结构无效',
+        description: '此卡片不会执行批准操作，请重新生成计划。',
+      }
+    }
     return {
       key: stringValue(value, 'card_id'),
       kind: 'plan',
+      schemaVersion,
+      mode,
       title: stringValue(payload, 'title', '公务员备考计划'),
-      description: stringValue(payload, 'objective_summary'),
-      weeklyMinutes: numberValue(payload, 'weekly_minutes'),
+      description:
+        schemaVersion === '1.0'
+          ? stringValue(payload, 'objective_summary')
+          : `${plans.length} 个独立计划，共 ${numberValue(payload, 'total_weekly_minutes')} 分钟/周`,
+      weeklyMinutes:
+        schemaVersion === '1.0'
+          ? numberValue(payload, 'weekly_minutes')
+          : numberValue(payload, 'total_weekly_minutes'),
+      plans,
+      warnings: Array.isArray(payload.warnings)
+        ? payload.warnings.filter((item): item is string => typeof item === 'string')
+        : [],
       status:
         approvalStatus === 'PENDING'
           ? 'pending'
           : approvalStatus === 'EDITED'
             ? 'editing'
-            : 'approved',
+            : approvalStatus === 'REJECTED'
+              ? 'rejected'
+              : 'approved',
       approvalId: stringValue(refs, 'approval_id'),
       approvalVersion: numberValue(refs, 'approval_version', 1),
     }

@@ -846,6 +846,13 @@ export interface components {
             /** Start Time */
             start_time?: string | null;
         };
+        /** CardCollection */
+        CardCollection: {
+            /** Cards */
+            cards?: (components["schemas"]["PlanCardV11"] | {
+                [key: string]: unknown;
+            })[];
+        };
         /**
          * CitationAccessV1
          * @description 来源访问方式；私有文件 URL 短期有效，客户端不得持久化。
@@ -1036,10 +1043,7 @@ export interface components {
         MessageResponse: {
             /** Agent Run Id */
             agent_run_id: string | null;
-            /** Cards */
-            cards: {
-                [key: string]: unknown;
-            };
+            cards: components["schemas"]["CardCollection"];
             /** Content */
             content: string;
             /**
@@ -1102,6 +1106,75 @@ export interface components {
             expires_in: number;
             /** Resend After */
             resend_after: number;
+        };
+        /** PlanCardPayloadV11 */
+        PlanCardPayloadV11: {
+            /** Available Weekly Minutes */
+            available_weekly_minutes: number;
+            /**
+             * Mode
+             * @enum {string}
+             */
+            mode: "SINGLE_PLAN_CREATE" | "SINGLE_PLAN_ADJUST" | "BUNDLE_CREATE";
+            /** Plans */
+            plans: components["schemas"]["PlanCardPlanV11"][];
+            /** Title */
+            title: string;
+            /** Total Weekly Minutes */
+            total_weekly_minutes: number;
+            /** Warnings */
+            warnings?: string[];
+        };
+        /** PlanCardPlanV11 */
+        PlanCardPlanV11: {
+            /** Objective Summary */
+            objective_summary: string;
+            /**
+             * Plan Id
+             * Format: uuid
+             */
+            plan_id: string;
+            /**
+             * Plan Revision Id
+             * Format: uuid
+             */
+            plan_revision_id: string;
+            /** Title */
+            title: string;
+            /** Weekly Minutes */
+            weekly_minutes: number;
+            /** Work Item Id */
+            work_item_id: string;
+        };
+        /**
+         * PlanCardV11
+         * @description 新输出计划卡；MessageResponse 仍允许历史 1.0 与未知卡片只读透传。
+         */
+        PlanCardV11: {
+            /** Actions */
+            actions: {
+                [key: string]: unknown;
+            }[];
+            /**
+             * Card Id
+             * Format: uuid
+             */
+            card_id: string;
+            /**
+             * Card Type
+             * @constant
+             */
+            card_type: "PlanCard";
+            /** Entity Refs */
+            entity_refs: {
+                [key: string]: unknown;
+            };
+            payload: components["schemas"]["PlanCardPayloadV11"];
+            /**
+             * Schema Version
+             * @constant
+             */
+            schema_version: "1.1";
         };
         /** PreferencesRequest */
         PreferencesRequest: {

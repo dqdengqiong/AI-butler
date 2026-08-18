@@ -136,8 +136,8 @@ requires_structured_output = false
 max_attempts = 3
 
 [routes.multimodal]
-primary = "qwen_balanced"
-fallbacks = ["doubao_turbo"]
+primary = "doubao_turbo"
+fallbacks = ["qwen_balanced"]
 timeout_ms = 30000
 max_input_tokens = 128000
 max_output_tokens = 4096

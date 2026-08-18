@@ -184,7 +184,7 @@ class ConversationRepository:
         )
         await connection.execute(
             text(
-                "UPDATE approval_decisions SET status='EXPIRED',decided_at=now() "
+                "UPDATE approval_decisions SET status='CANCELLED',decided_at=now() "
                 "WHERE agent_run_id=:run_id AND status='PENDING'"
             ),
             {"run_id": run["id"]},

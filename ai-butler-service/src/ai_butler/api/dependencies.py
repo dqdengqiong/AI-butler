@@ -6,6 +6,7 @@ from typing import Annotated, cast
 from uuid import UUID
 
 from fastapi import Depends, Header, Request
+from sqlalchemy import text
 
 from ai_butler.application.butler import ButlerService
 from ai_butler.domain.errors import ButlerError
@@ -18,7 +19,7 @@ def get_butler(request: Request) -> ButlerService:
     return cast(ButlerService, request.app.state.butler)
 
 
-def current_user_id(
+async def current_user_id(
     request: Request,
     authorization: Annotated[str | None, Header()] = None,
 ) -> UUID:
@@ -33,6 +34,19 @@ def current_user_id(
         )
     except InvalidTokenError as exc:
         raise ButlerError("INVALID_ACCESS_TOKEN", "登录状态已失效", 401) from exc
+    async with request.app.state.database.connect() as connection:
+        active = (
+            await connection.execute(
+                text(
+                    "SELECT 1 FROM users u JOIN auth_sessions s ON s.user_id=u.id "
+                    "WHERE u.id=:user_id AND u.status='ACTIVE' AND s.id=:session_id "
+                    "AND s.status='ACTIVE' AND s.expires_at>now()"
+                ),
+                {"user_id": claims.user_id, "session_id": claims.session_id},
+            )
+        ).scalar_one_or_none()
+    if active is None:
+        raise ButlerError("INVALID_ACCESS_TOKEN", "登录状态已失效", 401)
     return claims.user_id
 
 

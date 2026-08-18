@@ -110,7 +110,7 @@ SSE 接口从 `agent_run_events` 按序读取事件，Worker 将面向用户的�
 
 ### 4.2 Segment 与 Summary
 
-- segment 状态为 `ACTIVE → ARCHIVING → ARCHIVED`；主聊天同时只能有一个 ACTIVE segment。
+- segment 状态为 `ACTIVE → ARCHIVING → ARCHIVED`；每个 conversation 同时只能有一个 ACTIVE segment。
 - 当前 segment 存在非终态 run 时不能归档；等待输入或审批的 run 必须在原 segment/thread 恢复。
 - `SEGMENT_FINAL` 总结单段，`CUMULATIVE_HANDOFF` 将上一交接摘要与新段摘要增量压缩。
 - 长期用户事实在摘要中只保存 `memory_ref`，运行时解析活跃 Store 值，避免更正或遗忘后旧摘要复活事实。
@@ -628,12 +628,12 @@ usable_context_tokens = model_context_window
 ### 9.2 自动归档与线程轮换
 
 1. run 终态后重新估算 Token；70% 时创建或刷新 `INCREMENTAL` 摘要。
-2. 85% 时在一个短事务中锁定主聊天，封存旧段的 `end_message_id`、将其置为 `ARCHIVING`，同时创建下一序号 ACTIVE segment/新 `thread_id` 并切换 `active_segment_id`。
+2. 85% 时在一个短事务中锁定 conversation，封存旧段的 `end_message_id`、将其置为 `ARCHIVING`，同时创建下一序号 ACTIVE segment/新 `thread_id` 并切换 `active_segment_id`。
 3. 高优先级归档任务为旧段生成 `SEGMENT_FINAL`，再结合上一累计摘要发布新的 `CUMULATIVE_HANDOFF`，最后将旧段标为 `ARCHIVED`。
 4. 归档期间到达的新消息绑定已经创建的新 ACTIVE segment 并正常入库排队；该 segment 的 Worker 必须等待前序分段交接成功或确定性降级完成后再调用模型。
 5. 旧 thread checkpoint 保留 7 天后清理；消息和摘要不受影响。
 
-前端始终按主聊天 `(created_at, id)` 分页，不展示 segment 边界，也不提供归档操作。
+前端始终按当前 conversation 的 `(created_at, id)` 分页，不展示 segment 边界，也不提供 segment 归档操作。
 
 ### 9.3 长期记忆生命周期
 
@@ -692,7 +692,7 @@ type ChatStreamState = {
 
 ## 11. 安全与隐私
 
-- 主聊天、segment、消息、run、事件和记忆查询都按当前 `user_id` 校验，客户端不能指定内部 conversation/segment 或 Store namespace。
+- conversation、segment、消息、run、事件和记忆查询都按当前 `user_id` 校验，客户端不能指定内部 conversation/segment 或 Store namespace。
 - 流票据不能写入业务日志、埋点、Referer 或错误上报；服务端访问日志隐藏票据。
 - Markdown 使用白名单渲染，禁用原始 HTML、脚本和危险 URL scheme。
 - 引用 URL 必须经过协议和域名安全校验；外链默认使用安全跳转策略。

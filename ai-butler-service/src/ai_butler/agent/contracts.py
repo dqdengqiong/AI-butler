@@ -48,14 +48,21 @@ class AgentStateV1(BaseModel):
     segment_id: UUID
     thread_id: str
     pending_action_key: str
+    graph_version: str
+    prompt_bundle_version: str
+    capability_registry_version: str
+    capability_registry_fingerprint: str
     intent: Literal["PLAN", "ADJUST", "QUESTION", "MEMORY", "UNKNOWN"] = "UNKNOWN"
     next_node: Literal[
         "Router",
         "Profile",
         "Research",
         "Planner",
+        "Review",
+        "Evidence Gate",
         "Approval",
         "Executor",
+        "Feedback/Adjust",
         "Response",
     ] = "Router"
     context: ContextBundleV1

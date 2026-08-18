@@ -222,10 +222,10 @@ class ConversationQueryService:
         user_id: UUID,
         messages: list[dict[str, Any]],
     ) -> None:
-        """用审批事实覆盖消息快照中的可变版本与草案摘要。
+        """用审批事实覆盖消息快照中的可变状态与不可变 revision 投影。
 
-        PlanCard 是历史消息的一部分，但 EDIT 会在同一 approval 上生成新版本。
-        读取时必须投影当前版本，既修复旧数据，也避免客户端刷新后继续提交旧版本。
+        PlanCard 是历史消息的一部分；EDIT 会生成新 approval/revision 并更新该卡快照。
+        读取时仍从业务表投影状态，避免客户端根据历史 JSON 推断审批事实。
         """
 
         approval_ids: set[UUID] = set()
@@ -248,12 +248,12 @@ class ConversationQueryService:
             (
                 await connection.execute(
                     text(
-                        "SELECT DISTINCT ON (a.id) a.id,a.approval_version,a.status,"
-                        "pr.objective_summary,pr.weekly_minutes FROM approval_decisions a "
+                        "SELECT a.id,a.approval_version,a.status,ai.plan_id,ai.work_item_id,"
+                        "pr.id AS plan_revision_id,pr.objective_summary,pr.weekly_minutes "
+                        "FROM approval_decisions a "
                         "JOIN approval_decision_items ai ON ai.approval_id=a.id "
                         "JOIN plan_revisions pr ON pr.id=ai.plan_revision_id "
-                        "WHERE a.user_id=:user_id AND a.id=ANY(:approval_ids) "
-                        "ORDER BY a.id,ai.id"
+                        "WHERE a.user_id=:user_id AND a.id=ANY(:approval_ids) ORDER BY a.id,ai.plan_id"
                     ),
                     {"user_id": user_id, "approval_ids": list(approval_ids)},
                 )
@@ -261,7 +261,9 @@ class ConversationQueryService:
             .mappings()
             .all()
         )
-        current = {str(row["id"]): row for row in rows}
+        current: dict[str, list[dict[str, Any]]] = {}
+        for row in rows:
+            current.setdefault(str(row["id"]), []).append(dict(row))
         for message in messages:
             structured = message.get("cards")
             cards = structured.get("cards", []) if isinstance(structured, dict) else []
@@ -271,15 +273,35 @@ class ConversationQueryService:
                 refs = card.get("entity_refs")
                 if not isinstance(refs, dict):
                     continue
-                approval = current.get(str(refs.get("approval_id")))
-                if approval is None:
+                approval_items = current.get(str(refs.get("approval_id")))
+                if not approval_items:
                     continue
+                approval = approval_items[0]
                 refs["approval_version"] = int(approval["approval_version"])
                 refs["approval_status"] = str(approval["status"])
                 payload = card.get("payload")
                 if isinstance(payload, dict):
-                    payload["objective_summary"] = approval["objective_summary"]
-                    payload["weekly_minutes"] = int(approval["weekly_minutes"])
+                    if card.get("schema_version") == "1.1" and isinstance(
+                        payload.get("plans"), list
+                    ):
+                        by_plan = {str(item["plan_id"]): item for item in approval_items}
+                        for plan in payload["plans"]:
+                            if not isinstance(plan, dict):
+                                continue
+                            revision = by_plan.get(str(plan.get("plan_id")))
+                            if revision is None:
+                                continue
+                            plan["plan_revision_id"] = str(revision["plan_revision_id"])
+                            plan["objective_summary"] = revision["objective_summary"]
+                            plan["weekly_minutes"] = int(revision["weekly_minutes"])
+                        payload["total_weekly_minutes"] = sum(
+                            int(plan.get("weekly_minutes", 0))
+                            for plan in payload["plans"]
+                            if isinstance(plan, dict)
+                        )
+                    else:
+                        payload["objective_summary"] = approval["objective_summary"]
+                        payload["weekly_minutes"] = int(approval["weekly_minutes"])
 
     @staticmethod
     def _specialist_response(row: dict[str, Any] | None) -> dict[str, object] | None:

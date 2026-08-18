@@ -6,6 +6,7 @@ from uuid import UUID, uuid4
 
 from sqlalchemy import text
 
+from ai_butler.agent.runtime import DEFAULT_CAPABILITY_REGISTRY
 from ai_butler.api.schemas import (
     SendMessageRequest,
 )
@@ -59,8 +60,8 @@ class MessageService:
                 await connection.execute(
                     text(
                         "SELECT m.id AS user_message_id,m.client_request_hash,m.conversation_id,"
-                        "r.id AS run_id,r.response_message_id,r.status,r.attempt "
-                        "FROM messages m JOIN agent_runs r ON r.request_message_id=m.id "
+                        "r.id AS run_id,r.pending_response_message_id,r.status,r.attempt "
+                        "FROM messages m JOIN agent_runs r ON r.trigger_message_id=m.id "
                         "WHERE m.user_id=:user_id AND m.client_message_id=:client_id"
                     ),
                     {
@@ -125,7 +126,7 @@ class MessageService:
                         text(
                             "SELECT structured_content FROM messages WHERE id=:id AND user_id=:user_id"
                         ),
-                        {"id": active["response_message_id"], "user_id": user_id},
+                        {"id": active["pending_response_message_id"], "user_id": user_id},
                     )
                 )
                 cards = (prompt or {}).get("structured_content") or {}
@@ -190,7 +191,7 @@ class MessageService:
                     ),
                     {
                         "cards": _json(cards),
-                        "id": active["response_message_id"],
+                        "id": active["pending_response_message_id"],
                         "user_id": user_id,
                     },
                 )
@@ -200,7 +201,7 @@ class MessageService:
                         text(
                             "SELECT structured_content FROM messages WHERE id=:id AND user_id=:user_id"
                         ),
-                        {"id": active["response_message_id"], "user_id": user_id},
+                        {"id": active["pending_response_message_id"], "user_id": user_id},
                     )
                 )
                 cards = (prompt or {}).get("structured_content") or {}
@@ -225,7 +226,7 @@ class MessageService:
                         ),
                         {
                             "cards": _json(cards),
-                            "id": active["response_message_id"],
+                            "id": active["pending_response_message_id"],
                             "user_id": user_id,
                         },
                     )
@@ -237,7 +238,7 @@ class MessageService:
                 execution_mode = "INPUT_RESUME"
                 await connection.execute(
                     text(
-                        "UPDATE agent_runs SET request_message_id=:message_id,response_message_id=:response_id,"
+                        "UPDATE agent_runs SET pending_message_id=:message_id,pending_response_message_id=:response_id,"
                         "status='QUEUED',pending_action='INPUT_RESUME',pending_action_key=:action_key,updated_at=:now "
                         "WHERE id=:run_id"
                     ),
@@ -274,6 +275,13 @@ class MessageService:
             )
             await connection.execute(
                 text(
+                    "INSERT INTO memory_extraction_jobs(id,user_id,message_id,status) "
+                    "VALUES(:id,:user_id,:message_id,'PENDING') ON CONFLICT(message_id) DO NOTHING"
+                ),
+                {"id": uuid4(), "user_id": user_id, "message_id": user_message_id},
+            )
+            await connection.execute(
+                text(
                     "INSERT INTO messages(id,user_id,conversation_id,segment_id,agent_run_id,role,status,content,created_at) "
                     "VALUES(:id,:user_id,:conversation_id,:segment_id,:run_id,'ASSISTANT','PENDING','',:created_at)"
                 ),
@@ -289,11 +297,11 @@ class MessageService:
             if not active:
                 await connection.execute(
                     text(
-                        "INSERT INTO agent_runs(id,user_id,conversation_id,segment_id,request_message_id,"
-                        "response_message_id,status,pending_action,pending_action_key,input_summary,"
-                        "selected_user_agent_id) "
-                        "VALUES(:id,:user_id,:conversation_id,:segment_id,:request_id,:response_id,'QUEUED',"
-                        "'START',:action_key,:summary,:selected_agent)"
+                        "INSERT INTO agent_runs(id,user_id,conversation_id,segment_id,trigger_message_id,"
+                        "pending_message_id,pending_response_message_id,status,pending_action,pending_action_key,"
+                        "input_summary,selected_user_agent_id,capability_registry_fingerprint,trace_id) "
+                        "VALUES(:id,:user_id,:conversation_id,:segment_id,:request_id,:request_id,:response_id,'QUEUED',"
+                        "'START',:action_key,:summary,:selected_agent,:registry_fingerprint,:trace_id)"
                     ),
                     {
                         "id": run_id,
@@ -305,6 +313,8 @@ class MessageService:
                         "action_key": f"start:{request.client_message_id}",
                         "summary": self._safe_summary(request.content),
                         "selected_agent": conversation["specialist_user_agent_id"],
+                        "registry_fingerprint": DEFAULT_CAPABILITY_REGISTRY.fingerprint,
+                        "trace_id": str(uuid4()),
                     },
                 )
             for attachment in request.attachments:
@@ -321,11 +331,14 @@ class MessageService:
                     raise ButlerError("FILE_NOT_READY", "附件尚未完成安全验证", 409)
                 await connection.execute(
                     text(
-                        "INSERT INTO message_attachments(message_id,file_id,position) VALUES(:message,:file,:position)"
+                        "INSERT INTO message_attachments(id,message_id,stored_file_id,user_id,position) "
+                        "VALUES(:id,:message,:file,:user_id,:position)"
                     ),
                     {
+                        "id": uuid4(),
                         "message": user_message_id,
                         "file": attachment.file_id,
+                        "user_id": user_id,
                         "position": attachment.position,
                     },
                 )
@@ -369,7 +382,7 @@ class MessageService:
             result = {
                 "user_message_id": user_message_id,
                 "run_id": run_id,
-                "response_message_id": assistant_message_id,
+                "pending_response_message_id": assistant_message_id,
                 "status": "QUEUED",
                 "attempt": int(active["attempt"]) if active else 0,
             }

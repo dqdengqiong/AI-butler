@@ -45,6 +45,7 @@ class SearchResult:
     published_at: datetime | None = None
     source_type: str = "WEB"
     knowledge_chunk_id: UUID | None = None
+    document_id: UUID | None = None
 
 
 class SearchProvider(Protocol):
@@ -175,3 +176,9 @@ def minimize_public_query(value: str, *, max_length: int = 300) -> str:
     normalized = _EMAIL.sub("[已省略邮箱]", normalized)
     normalized = _LONG_NUMBER.sub("[已省略编号]", normalized)
     return " ".join(normalized.split())[:max_length].strip()
+
+
+def normalize_private_query(value: str, *, max_length: int = 2000) -> str:
+    """规范私有检索文本但保留编号、日期等只在用户资料内使用的关键词。"""
+
+    return " ".join(value.split())[:max_length].strip()

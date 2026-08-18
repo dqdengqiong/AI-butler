@@ -1,4 +1,4 @@
-# AI个人管家系统详细设计文档 V2.4
+# AI个人管家系统详细设计文档 V3.0
 
 ## 1. 文档目标
 
@@ -18,6 +18,7 @@
 - 独立微服务、复杂自动扩容和多区域部署
 - 由模型直接执行高风险外部操作
 - Celery 和 API Gateway 的强制依赖
+- MCP runtime、Redis 作业队列和独立微服务
 
 ## 2. 设计原则
 
@@ -39,7 +40,7 @@ uni-app（微信小程序 / H5）
             |
 FastAPI 模块化单体
   ├─ Auth / User
-  ├─ Single Chat / Context Archive
+  ├─ Automatic Conversation / Context Archive
   ├─ Long-term Memory Policy
   ├─ Agent Orchestrator
   ├─ Goal / Plan / Task
@@ -137,7 +138,7 @@ PostgreSQL  LangGraph              Qdrant       对象存储
 
 - 提供单一聊天入口；不提供手动新建，由消息入口自动延续、恢复或归档并创建场景
 - 保存用户消息、Assistant 占位消息、最终内容和结构化卡片
-- 将主聊天拆为内部 `conversation_segments`；每个分段映射一个不可变 LangGraph `thread_id`
+- 将每个自动路由会话拆为内部 `conversation_segments`；每个分段映射一个不可变 LangGraph `thread_id`
 - 处理用户级消息幂等、执行槽互斥和跨会话输入中断恢复
 - 为客户端提供可续传的聊天事件流
 - 依据模型 Token 预算在 70% 软阈值预生成摘要，在 85% 硬阈值归档分段并轮换线程
@@ -153,7 +154,7 @@ PostgreSQL  LangGraph              Qdrant       对象存储
 - 中间推理内容不写入 `messages`，仅保存可展示结果与必要审计字段。
 - Research、Planner 原始 token 不流向客户端；只流式输出 Response 节点和预定义进度代码。
 - 同一 segment/thread 开始新 run 时清空上一次 run 的工作字段；中断恢复同一 run 时保留工作状态。
-- 归档不删除消息；客户端始终按主聊天全局时间线分页，不能感知或指定 segment。
+- segment 归档不删除消息；客户端始终按 conversation 时间线分页，不能感知或指定 segment。
 
 ### 5.3 Long-term Memory Policy
 
@@ -170,7 +171,7 @@ PostgreSQL  LangGraph              Qdrant       对象存储
 
 职责：
 
-- 为每个用户提供内置 `BUTLER` User Agent，所有主聊天会话均绑定该实例
+- 为每个用户提供内置 `BUTLER` User Agent，所有自动路由会话均绑定该实例
 - 根据意图和专业 `user_agent` 状态选择一个或多个后台专业流程
 - 加载当前线程和最新业务事实
 - 执行单个 LangGraph 的节点和条件边
@@ -227,7 +228,7 @@ Qdrant 规则：
 
 ```text
 客户端发送消息 + client_message_id
-  → 鉴权并幂等解析用户唯一主聊天及 ACTIVE segment
+  → 鉴权并幂等解析用户的唯一 CURRENT 会话及其 ACTIVE segment
   → 事务锁定 conversation，检查幂等记录、归档状态和活动 run
   → 创建 User message、Assistant 占位 message、agent_run/run.accepted 事件
   → API 返回 202 和短期流票据，客户端建立 SSE
@@ -570,6 +571,8 @@ docker compose
 
 LangGraph 数据库必须启用 pgvector 扩展，并由 `AsyncPostgresStore.setup()` 管理 Store/向量索引。Qdrant 继续只承担知识文档向量，不混入用户长期记忆。
 
+验证数据不提供旧版本迁移或字段兼容。受保护命令 `make verification-rebuild CONFIRM=DELETE_ALL_VERIFICATION_DATA` 仅允许 `development/test`，并固定执行：停止 API/Worker → 删除 Compose PostgreSQL、LangGraph、Qdrant 和对象卷 → 创建数据库 → 执行唯一初始迁移 → 初始化 Checkpointer/Store/pgvector → 创建 Qdrant collection/payload index → 导入明确标注的合成种子数据。staging/production 必须直接拒绝该命令。
+
 容器使用固定版本，不使用 `latest`。密钥通过部署环境或密钥管理服务注入，不写入镜像和仓库。Nginx 对聊天事件路径关闭响应缓冲，空闲超时大于 45 秒；SSE heartbeat 默认每 15 秒发送。
 
 ### 13.2 备份目标
@@ -589,16 +592,13 @@ LangGraph 数据库必须启用 pgvector 扩展，并由 `AsyncPostgresStore.set
 4. 当知识量或检索延迟要求提升时，增加 Qdrant 副本、分片和独立备份。
 5. 当某节点需要独立扩缩容、安全域或团队所有权时，才拆分为独立服务。
 
-## 15. 开发顺序
+## 15. 实现状态与发布门禁
 
-1. 用户、认证、Agent 定义和 User Agent
-2. 单主聊天、segment、消息、run、持久化聊天事件、SSE 与 LangGraph PostgreSQL checkpoint
-3. Token 预算、两级摘要、自动归档、线程轮换和 checkpoint 清理
-4. LangGraph Store、记忆提取作业、Policy、检索、更正与遗忘
-5. 用户画像、目标和 Profile 节点
-6. 知识入库、Qdrant 检索和 Claim/Citation
-7. Planner、确定性计划校验和 Evidence Gate
-8. Approval interrupt、计划版本发布和任务物化
-9. 任务反馈、通知 Worker、可观测性、安全测试和恢复演练
+上述用户、自动会话、LangGraph、上下文、记忆、计划审批、RAG、通知和治理能力属于同一 V3.0 发布基线，不再按阶段拆分上线。发布必须同时满足：
 
-每个阶段完成数据库约束、接口测试和失败恢复测试后再进入下一阶段。
+1. 后端 `make ci`、空库初始迁移、重复初始化和开发/测试重置保护。
+2. Worker lease 接管、输入/审批恢复、SSE sequence 续传、segment 归档竞态与副作用幂等测试。
+3. 组合审批整体回滚、单计划调整、EDIT 新审批、七天任务物化和通知重试测试。
+4. Prompt Injection、伪造引用、SSRF、工具越权、跨租户向量、日志泄露和敏感记忆评测。
+5. 账号删除中途失败续跑，最终 PostgreSQL、Checkpointer、Store、Qdrant 和对象文件均不含用户内容。
+6. 前端 `pnpm ci:check`、PlanCard 1.0/1.1 兼容与 OpenAPI 同步检查。

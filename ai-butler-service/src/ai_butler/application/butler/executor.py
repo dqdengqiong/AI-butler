@@ -10,18 +10,21 @@ from ai_butler.adapters.search import (
     SearchResult,
     SearchUnavailableError,
     minimize_public_query,
+    normalize_private_query,
 )
 from ai_butler.adapters.vector import VectorStoreError
 from ai_butler.agent.availability import (
     AvailabilityInterpretationV1,
     AvailabilityInterpreter,
 )
+from ai_butler.agent.evidence import estimate_tokens
 from ai_butler.domain.errors import ButlerError
 
 from .completion import CompletionService
 from .context import ButlerContext
 from .evidence_execution import EvidenceExecutionService
 from .interrupts import InterruptionService
+from .memory import LongTermMemoryService
 from .plan_execution import PlanExecutionService
 from .shared import (
     PLAN_ACTION_PATTERN,
@@ -50,6 +53,7 @@ class RunExecutor:
         self.vector_store = context.vector_store
         self.availability_interpreter = context.availability_interpreter
         self.evidence_gate = context.evidence_gate
+        self.research_input_tokens = context.research_input_tokens
         self._emit_progress = interrupts._emit_progress
         self._interrupt_for_input = interrupts._interrupt_for_input
         self._interrupt_for_availability_confirmation = (
@@ -60,8 +64,11 @@ class RunExecutor:
         )
         self._create_plan_draft = planning._create_plan_draft
         self._regenerate_approval = planning._regenerate_approval
+        self._materialize_approval = planning._materialize_approval
         self._complete_rag_run = evidence._complete_rag_run
+        self._generate_rag_answer = evidence._generate_rag_answer
         self._complete_run = completion._complete_run
+        self._memory = LongTermMemoryService(context)
 
     async def _execute_run(self, run_id: UUID) -> None:
         """在事务外完成联网检索，再用短事务原子写入回答与引用。
@@ -81,7 +88,7 @@ class RunExecutor:
             request_message = _row(
                 await connection.execute(
                     text("SELECT content,structured_content FROM messages WHERE id=:id"),
-                    {"id": snapshot["request_message_id"]},
+                    {"id": snapshot["pending_message_id"]},
                 )
             ) or {"content": "", "structured_content": {}}
             current_input = str(request_message.get("content") or "")
@@ -104,7 +111,7 @@ class RunExecutor:
                 for row in (
                     await connection.execute(
                         text(
-                            "SELECT DISTINCT ma.file_id FROM message_attachments ma "
+                            "SELECT DISTINCT ma.stored_file_id FROM message_attachments ma "
                             "JOIN messages m ON m.id=ma.message_id "
                             "WHERE m.agent_run_id=:id AND m.role='USER'"
                         ),
@@ -112,6 +119,20 @@ class RunExecutor:
                     )
                 ).all()
             )
+
+        memory_command = await self._memory.handle_explicit_command(
+            UUID(str(snapshot["user_id"])), current_input
+        )
+        if memory_command is not None:
+            async with self.database.transaction() as connection:
+                run = _row(
+                    await connection.execute(
+                        text("SELECT * FROM agent_runs WHERE id=:id FOR UPDATE"), {"id": run_id}
+                    )
+                )
+                if run is not None and run["status"] == "RUNNING":
+                    await self._complete_run(connection, run, memory_command.response)
+            return
 
         raw_results: tuple[SearchResult, ...] = ()
         is_plan = bool(PLAN_PATTERN.search(content) and PLAN_ACTION_PATTERN.search(content))
@@ -179,12 +200,13 @@ class RunExecutor:
             or bool(WEB_FORCE_PATTERN.search(content))
             or (bool(SEARCH_PATTERN.search(content)) and not attachment_file_ids)
         )
-        query = minimize_public_query(content) or "公务员备考资料"
+        private_query = normalize_private_query(content) or "公务员备考资料"
+        public_query = minimize_public_query(content) or "公务员备考资料"
         if needs_private:
             await self._emit_progress(snapshot, "RETRIEVING_PRIVATE")
             try:
                 raw_results += await self._retrieve_private_evidence(
-                    UUID(str(snapshot["user_id"])), query, attachment_file_ids
+                    UUID(str(snapshot["user_id"])), private_query, attachment_file_ids
                 )
             except VectorStoreError as exc:
                 raise ButlerError(
@@ -194,7 +216,10 @@ class RunExecutor:
             await self._emit_progress(snapshot, "SEARCHING_WEB")
             try:
                 results = await self.search_provider.search(
-                    SearchRequest(query=query, max_results=self.settings.search_max_results)
+                    SearchRequest(
+                        query=public_query,
+                        max_results=self.settings.search_candidate_results,
+                    )
                 )
             except SearchUnavailableError as exc:
                 raise ButlerError(
@@ -203,10 +228,28 @@ class RunExecutor:
             except SearchError as exc:
                 raise ButlerError("SEARCH_PROVIDER_INVALID", "联网搜索返回无效结果", 502) from exc
             raw_results += results
-        evidence = self.evidence_gate.normalize(raw_results, limit=self.settings.search_max_results)
+        evidence_budget = min(
+            self.settings.rag_evidence_max_tokens,
+            max(
+                0,
+                self.research_input_tokens
+                - estimate_tokens(content)
+                - self.settings.rag_token_safety_margin,
+            ),
+        )
+        evidence = self.evidence_gate.normalize(
+            raw_results,
+            limit=self.settings.search_max_results,
+            token_budget=evidence_budget,
+            max_item_tokens=self.settings.rag_evidence_max_item_tokens,
+        )
         needs_search = needs_private or needs_web
         if needs_search:
             await self._emit_progress(snapshot, "ORGANIZING_CITATIONS")
+        rag_answer = None
+        if needs_search and not is_plan and evidence:
+            await self._emit_progress(snapshot, "GENERATING_ANSWER")
+            rag_answer = await self._generate_rag_answer(content, evidence, run_id=run_id)
 
         async with self.database.transaction() as connection:
             run = _row(
@@ -258,6 +301,10 @@ class RunExecutor:
                 if action == "EDIT" and approval:
                     await self._regenerate_approval(connection, run, approval)
                     return
+                if action == "APPROVE" and approval:
+                    await self._materialize_approval(
+                        connection, UUID(str(run["user_id"])), UUID(str(approval["id"]))
+                    )
                 await self._complete_run(connection, run, response)
                 return
             if is_plan:
@@ -277,7 +324,7 @@ class RunExecutor:
                     await self._interrupt_for_input(connection, run)
                 return
             if needs_search:
-                await self._complete_rag_run(connection, run, evidence)
+                await self._complete_rag_run(connection, run, evidence, rag_answer)
                 return
             await self._complete_run(
                 connection,
@@ -293,17 +340,42 @@ class RunExecutor:
     ) -> tuple[SearchResult, ...]:
         """向量召回后重新读取 PostgreSQL 所有权事实，拒绝信任 Qdrant payload 授权。"""
 
+        document_ids: tuple[UUID, ...] = ()
+        if allowed_file_ids:
+            async with self.database.connect() as connection:
+                document_rows = (
+                    await connection.execute(
+                        text(
+                            "SELECT kd.id FROM knowledge_documents kd "
+                            "JOIN stored_files sf ON sf.id=kd.stored_file_id "
+                            "WHERE kd.owner_user_id=:user_id AND kd.stored_file_id=ANY(:file_ids) "
+                            "AND kd.visibility='PRIVATE' AND kd.ingestion_status='READY' "
+                            "AND sf.upload_status='VERIFIED' AND sf.scan_status='CLEAN'"
+                        ),
+                        {"user_id": user_id, "file_ids": list(allowed_file_ids)},
+                    )
+                ).all()
+            document_ids = tuple(UUID(str(row[0])) for row in document_rows)
+            if not document_ids:
+                return ()
+
         vector = await self.embedding_provider.embed(query)
-        chunk_ids = await self.vector_store.search(
-            user_id, vector, self.settings.search_max_results
+        hits = await self.vector_store.search(
+            user_id,
+            vector,
+            self.settings.search_candidate_results,
+            document_ids,
         )
-        if not chunk_ids:
+        if not hits:
             return ()
+        hit_by_chunk = {hit.chunk_id: hit for hit in hits}
+        chunk_ids = tuple(hit_by_chunk)
         parameters: dict[str, object] = {"user_id": user_id, "chunk_ids": list(chunk_ids)}
         if allowed_file_ids:
             parameters["file_ids"] = list(allowed_file_ids)
             query_text = text(
-                "SELECT kc.id,kc.content,kd.title,kd.stored_file_id FROM knowledge_chunks kc "
+                "SELECT kc.id,kc.content,kd.id AS document_id,kd.title,kd.stored_file_id "
+                "FROM knowledge_chunks kc "
                 "JOIN knowledge_documents kd ON kd.id=kc.document_id "
                 "JOIN stored_files sf ON sf.id=kd.stored_file_id "
                 "WHERE kc.id=ANY(:chunk_ids) AND kd.owner_user_id=:user_id "
@@ -313,7 +385,8 @@ class RunExecutor:
             )
         else:
             query_text = text(
-                "SELECT kc.id,kc.content,kd.title,kd.stored_file_id FROM knowledge_chunks kc "
+                "SELECT kc.id,kc.content,kd.id AS document_id,kd.title,kd.stored_file_id "
+                "FROM knowledge_chunks kc "
                 "JOIN knowledge_documents kd ON kd.id=kc.document_id "
                 "JOIN stored_files sf ON sf.id=kd.stored_file_id "
                 "WHERE kc.id=ANY(:chunk_ids) AND kd.owner_user_id=:user_id "
@@ -321,19 +394,24 @@ class RunExecutor:
                 "AND sf.upload_status='VERIFIED' AND sf.scan_status='CLEAN'"
             )
         async with self.database.connect() as connection:
-            rows = (await connection.execute(query_text, parameters)).mappings().all()
-        by_id = {UUID(str(row["id"])): row for row in rows}
+            chunk_rows = (await connection.execute(query_text, parameters)).mappings().all()
+        by_id = {
+            UUID(str(row["id"])): row
+            for row in chunk_rows
+            if hit_by_chunk[UUID(str(row["id"]))].document_id == UUID(str(row["document_id"]))
+        }
         return tuple(
             SearchResult(
                 evidence_ref=f"private-{chunk_id}",
                 title=str(by_id[chunk_id]["title"]),
                 source_organization="我的资料",
                 content=str(by_id[chunk_id]["content"]),
-                score=max(0.0, 1.0 - index * 0.01),
+                score=hit_by_chunk[chunk_id].score,
                 url=None,
                 source_type="PRIVATE_FILE",
                 knowledge_chunk_id=chunk_id,
+                document_id=UUID(str(by_id[chunk_id]["document_id"])),
             )
-            for index, chunk_id in enumerate(chunk_ids)
+            for chunk_id in chunk_ids
             if chunk_id in by_id
         )

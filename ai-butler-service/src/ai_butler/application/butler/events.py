@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from uuid import UUID, uuid4
+from uuid import UUID
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
@@ -38,11 +38,10 @@ class EventService:
         )
         await connection.execute(
             text(
-                "INSERT INTO agent_run_events(id,run_id,user_id,sequence,event_type,attempt,payload) "
-                "VALUES(:id,:run_id,:user_id,:sequence,:event_type,:attempt,CAST(:payload AS jsonb))"
+                "INSERT INTO agent_run_events(agent_run_id,user_id,sequence,event_type,attempt,payload) "
+                "VALUES(:run_id,:user_id,:sequence,:event_type,:attempt,CAST(:payload AS jsonb))"
             ),
             {
-                "id": uuid4(),
                 "run_id": run_id,
                 "user_id": user_id,
                 "sequence": sequence,

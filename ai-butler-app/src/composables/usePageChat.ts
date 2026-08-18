@@ -75,6 +75,18 @@ export function usePageChat(token: () => string, attachments: Ref<UploadedAttach
     uni.showToast({ title: '请在输入框继续说明', icon: 'none' })
   }
 
+  async function rejectPlan(item: PlanChatItem): Promise<void> {
+    if (item.status !== 'pending' || submittingApprovalIds.has(item.approvalId)) return
+    submittingApprovalIds.add(item.approvalId)
+    try {
+      await butler.approvePlan(item, 'REJECT', token())
+    } catch (error) {
+      uni.showToast({ title: error instanceof Error ? error.message : '拒绝失败', icon: 'none' })
+    } finally {
+      submittingApprovalIds.delete(item.approvalId)
+    }
+  }
+
   async function sendMessage(content: string): Promise<void> {
     const normalized = content.trim()
     const clientMessageId = `message-${Date.now()}-${Math.random().toString(36).slice(2)}`
@@ -138,5 +150,13 @@ export function usePageChat(token: () => string, attachments: Ref<UploadedAttach
     }
   }
 
-  return { approvePlan, editPlan, editingPlan, selectOption, sendMessage, submitSelection }
+  return {
+    approvePlan,
+    editPlan,
+    editingPlan,
+    rejectPlan,
+    selectOption,
+    sendMessage,
+    submitSelection,
+  }
 }

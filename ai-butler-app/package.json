@@ -21,7 +21,7 @@
     "test": "vitest run --coverage",
     "docs:check": "node scripts/check-markdown-links.mjs",
     "secrets:check": "node scripts/check-secrets.mjs",
-    "ci:check": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test && pnpm api:check && pnpm docs:check && pnpm secrets:check && pnpm build:h5 && pnpm build:mp-weixin"
+    "ci:check": "corepack pnpm format:check && corepack pnpm lint && corepack pnpm typecheck && corepack pnpm test && corepack pnpm api:check && corepack pnpm docs:check && corepack pnpm secrets:check && corepack pnpm build:h5 && corepack pnpm build:mp-weixin"
   },
   "dependencies": {
     "@dcloudio/uni-app": "3.0.0-5020320260806002",

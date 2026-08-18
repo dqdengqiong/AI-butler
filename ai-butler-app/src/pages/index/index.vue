@@ -72,8 +72,15 @@ const {
   sourceTypeLabel,
   updateReminders,
 } = resources
-const { approvePlan, editPlan, editingPlan, selectOption, sendMessage, submitSelection } =
-  usePageChat(token, attachments)
+const {
+  approvePlan,
+  editPlan,
+  editingPlan,
+  rejectPlan,
+  selectOption,
+  sendMessage,
+  submitSelection,
+} = usePageChat(token, attachments)
 
 const displayName = computed(() => user.value?.nickname || '小邓')
 const appReady = computed(() => loggedIn.value)
@@ -311,6 +318,7 @@ async function requestAdjustment(): Promise<void> {
         @submit-selection="submitSelection"
         @approve-plan="approvePlan"
         @edit-plan="editPlan"
+        @reject-plan="rejectPlan"
         @open-source="openSource"
         @select-agent="activateAgent"
       />

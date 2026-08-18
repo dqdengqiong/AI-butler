@@ -1,6 +1,7 @@
 COMPOSE = docker compose --env-file .env.local -f compose.dev.yml
+RUN = $(if $(wildcard .venv/bin/python),.venv/bin/,uv run )
 
-.PHONY: doctor bootstrap infra-up infra-down infra-up-knowledge stack-up stack-down migrate langgraph-setup seed reset-users dev-api dev-worker dev-scheduler openapi format lint typecheck test smoke eval-smoke eval eval-live docs-check secrets ci
+.PHONY: doctor bootstrap infra-up infra-down infra-up-knowledge stack-up stack-down migrate langgraph-setup knowledge-setup seed reset-users reset-verification-data verification-rebuild dev-api dev-worker dev-scheduler openapi format lint typecheck test smoke eval-smoke eval eval-live docs-check secrets ci
 
 doctor:
 	@./scripts/doctor.sh
@@ -27,64 +28,81 @@ infra-down:
 	$(COMPOSE) down
 
 migrate:
-	uv run alembic upgrade head
-	uv run python -m ai_butler.scripts.setup_langgraph
+	$(RUN)alembic upgrade head
+	$(RUN)python -m ai_butler.scripts.setup_langgraph
 
 langgraph-setup:
-	uv run python -m ai_butler.scripts.setup_langgraph
+	$(RUN)python -m ai_butler.scripts.setup_langgraph
+
+knowledge-setup:
+	$(RUN)python -m ai_butler.scripts.setup_knowledge
 
 seed:
-	uv run butler-seed
+	$(RUN)butler-seed
 
 reset-users:
-	uv run butler-reset-users --confirm-delete-all-users
+	$(RUN)butler-reset-users --confirm-delete-all-users
+
+reset-verification-data:
+	@test "$(CONFIRM)" = "DELETE_ALL_VERIFICATION_DATA" || (echo "refusing reset: pass CONFIRM=DELETE_ALL_VERIFICATION_DATA"; exit 2)
+	@case "$${APP_ENV:-development}" in development|test) ;; *) echo "refusing reset outside development/test"; exit 2 ;; esac
+	$(COMPOSE) stop api agent-worker scheduler-worker
+	$(COMPOSE) down --volumes --remove-orphans
+
+verification-rebuild: reset-verification-data
+	$(COMPOSE) up -d --wait postgres qdrant
+	$(COMPOSE) build api
+	$(COMPOSE) run --rm api alembic upgrade head
+	$(COMPOSE) run --rm api python -m ai_butler.scripts.setup_langgraph
+	$(COMPOSE) run --rm api python -m ai_butler.scripts.setup_knowledge
+	$(COMPOSE) run --rm api butler-seed
 
 dev-api:
-	uv run butler-api
+	$(RUN)butler-api
 
 dev-worker:
-	uv run butler-agent-worker
+	$(RUN)butler-agent-worker
 
 dev-scheduler:
-	uv run butler-scheduler-worker
+	$(RUN)butler-scheduler-worker
 
 openapi:
-	uv run python scripts/generate_openapi.py
+	$(RUN)python scripts/generate_openapi.py
 
 format:
-	uv run ruff format src tests scripts
+	$(RUN)ruff format src tests scripts
 
 lint:
-	uv run ruff format --check src tests scripts
-	uv run ruff check src tests scripts
-	uv run python scripts/check_source_lines.py --max-lines 500 src
+	$(RUN)ruff format --check src tests scripts
+	$(RUN)ruff check src tests scripts
+	$(RUN)python scripts/check_source_lines.py --max-lines 500 src
 
 typecheck:
-	uv run mypy
+	$(RUN)mypy
 
 test:
-	uv run pytest
+	$(RUN)pytest
 
 smoke:
-	uv run pytest tests/smoke
+	$(RUN)pytest tests/smoke
 
 eval-smoke:
 	@DEEPEVAL_DISABLE_DOTENV=1 DEEPEVAL_TELEMETRY_OPT_OUT=1 \
-		uv run pytest tests/evals -m eval_smoke --no-cov
+		$(RUN)pytest tests/evals -m eval_smoke --no-cov
 
 eval:
 	@DEEPEVAL_DISABLE_DOTENV=1 DEEPEVAL_TELEMETRY_OPT_OUT=1 \
-		uv run pytest tests/evals -m 'eval_core or eval_security' --no-cov
+		$(RUN)pytest tests/evals -m 'eval_core or eval_security' --no-cov
 
 eval-live:
 	@DEEPEVAL_DISABLE_DOTENV=1 DEEPEVAL_TELEMETRY_OPT_OUT=1 \
-		uv run butler-eval-live --suite live --trials 3
+		$(RUN)butler-eval-live --suite live --trials 3
 
 docs-check:
-	uv run python scripts/check_markdown_links.py
+	$(RUN)python scripts/check_markdown_links.py
 
 secrets:
-	@git ls-files -z | xargs -0 uv run detect-secrets-hook --no-verify \
+	@git ls-files -z | xargs -0 $(RUN)detect-secrets-hook --no-verify \
 		--exclude-files '(^|/)uv\.lock$$|(^|/)openapi\.json$$' \
 		--exclude-lines 'butler_(app|test|migrator)|POSTGRES_PASSWORD'
 

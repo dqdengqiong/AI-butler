@@ -1,6 +1,6 @@
 # AI个人管家项目技术调研文档（V3）
 
-> 设计基线说明：本文保留阶段性资源调研结论；当前 10 人产品验证版本的实施基线以《AI个人管家系统详细设计文档 V2.4》为准，聊天链路以《AI个人管家聊天系统设计文档 V1.3》为准。验证阶段不设置独立 API Gateway，Redis/Celery 为达到作业吞吐或调度复杂度阈值后的按需组件。
+> 设计基线说明：本文后半部分保留阶段性扩容调研，不代表当前依赖。当前完整版本采用模块化单体、FastAPI、单 LangGraph、PostgreSQL 作业队列和 Qdrant；不部署独立 API Gateway、Redis/Celery 或 MCP runtime。
 
 ## 一、服务器部署架构
 
@@ -11,16 +11,14 @@
 ```text
 用户端
   |
-API Gateway
-  |
 FastAPI 服务
   |
 Agent 服务（LangGraph）
   |
 ---------------------------
 |            |             |
-PostgreSQL  Qdrant       Redis
-业务数据     向量库        任务队列
+PostgreSQL       Qdrant
+业务/作业/记忆   知识向量
 ```
 
 文件存储：对象存储（OSS/S3）。
@@ -49,7 +47,7 @@ PostgreSQL  Qdrant       Redis
 - LangGraph Agent 服务
 - PostgreSQL
 - Qdrant
-- Redis
+- PostgreSQL 作业队列
 
 文件存储：可使用云对象存储，或小规模本地存储。
 

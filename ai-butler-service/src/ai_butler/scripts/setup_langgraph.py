@@ -12,19 +12,23 @@ from ai_butler.config import get_settings
 async def setup_internal_tables(database_url: str) -> None:
     async with AsyncPostgresSaver.from_conn_string(database_url) as checkpointer:
         await checkpointer.setup()
-    async with AsyncPostgresStore.from_conn_string(database_url) as store:
+    async with AsyncPostgresStore.from_conn_string(
+        database_url,
+        ttl={"refresh_on_read": False, "sweep_interval_minutes": 60},
+    ) as store:
         await store.setup()
 
 
 def grant_runtime_access(database_url: str) -> None:
     statements = (
-        "GRANT USAGE ON SCHEMA public TO butler_app",
-        "GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO butler_app",
-        "GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA public TO butler_app",
+        "GRANT USAGE ON SCHEMA public TO butler_app,butler_test",
+        "GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public "
+        "TO butler_app,butler_test",
+        "GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA public TO butler_app,butler_test",
         "ALTER DEFAULT PRIVILEGES IN SCHEMA public "
-        "GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO butler_app",
+        "GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO butler_app,butler_test",
         "ALTER DEFAULT PRIVILEGES IN SCHEMA public "
-        "GRANT USAGE, SELECT, UPDATE ON SEQUENCES TO butler_app",
+        "GRANT USAGE, SELECT, UPDATE ON SEQUENCES TO butler_app,butler_test",
     )
     with psycopg.connect(database_url) as connection, connection.cursor() as cursor:
         for statement in statements:

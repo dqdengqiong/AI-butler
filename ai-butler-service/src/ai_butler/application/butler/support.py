@@ -54,7 +54,10 @@ class ResponseFactory:
             "schema_version": "1.0",
             "conversation_id": conversation["id"],
             "user_message": {"id": run["user_message_id"], "status": "COMPLETED"},
-            "assistant_message": {"id": run["response_message_id"], "status": "PENDING"},
+            "assistant_message": {
+                "id": run["pending_response_message_id"],
+                "status": "PENDING",
+            },
             "run": {
                 "id": run_id,
                 "status": run["status"],

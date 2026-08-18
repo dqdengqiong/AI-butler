@@ -11,6 +11,7 @@ from ai_butler.adapters.embedding import (
     EmbeddingProvider,
 )
 from ai_butler.adapters.llm import LLM
+from ai_butler.adapters.notification import NotificationProvider
 from ai_butler.adapters.search import (
     SearchProvider,
 )
@@ -76,6 +77,7 @@ class ButlerService:
         llm: LLM | None = None,
         sms_provider: SmsProvider | None = None,
         conversation_router: ConversationRouter | None = None,
+        notification_provider: NotificationProvider | None = None,
     ) -> None:
         self._context = ButlerContext.build(
             database,
@@ -86,12 +88,14 @@ class ButlerService:
             llm,
             sms_provider,
             conversation_router,
+            notification_provider,
         )
         self.database = self._context.database
         self.settings = self._context.settings
         self.search_provider = self._context.search_provider
         self.embedding_provider = self._context.embedding_provider
         self.vector_store = self._context.vector_store
+        self.llm = self._context.llm
         self.availability_interpreter = self._context.availability_interpreter
         self.conversation_router = self._context.conversation_router
         self.evidence_gate = self._context.evidence_gate

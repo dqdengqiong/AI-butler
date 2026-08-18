@@ -314,7 +314,10 @@ async def test_complete_mock_login_plan_approval_task_file_and_governance_flow(
             for card in message.get("cards", {}).get("cards", [])
             if card["card_type"] == "PlanCard"
         )
-        assert plan_card["payload"]["weekly_minutes"] == 300
+        assert plan_card["schema_version"] == "1.1"
+        assert plan_card["payload"]["mode"] == "SINGLE_PLAN_CREATE"
+        assert plan_card["payload"]["total_weekly_minutes"] == 255
+        assert plan_card["payload"]["plans"][0]["weekly_minutes"] == 255
         assert "claim_ids" not in plan_card["payload"]
         source_card = next(
             card
@@ -496,7 +499,9 @@ async def test_complete_mock_login_plan_approval_task_file_and_governance_flow(
         assert edited.json()["status"] == "EDITED"
         assert await app.state.butler.worker_poll_once(uuid4()) is True
         regenerated = (await client.get(f"/v1/agent-runs/{adjustment_run}", headers=headers)).json()
-        assert regenerated["next_action"]["approval_version"] == 2
+        regenerated_approval = regenerated["next_action"]["approval_id"]
+        assert regenerated_approval != adjustment_approval
+        assert regenerated["next_action"]["approval_version"] == 1
         refreshed_messages = (
             await client.get(
                 f"/v1/conversations/{conversation_id}/messages?limit=100", headers=headers
@@ -506,11 +511,11 @@ async def test_complete_mock_login_plan_approval_task_file_and_governance_flow(
             card
             for message in refreshed_messages
             for card in message.get("cards", {}).get("cards", [])
-            if card.get("entity_refs", {}).get("approval_id") == adjustment_approval
+            if card.get("entity_refs", {}).get("approval_id") == regenerated_approval
         )
-        assert regenerated_card["entity_refs"]["approval_version"] == 2
+        assert regenerated_card["entity_refs"]["approval_version"] == 1
         assert regenerated_card["entity_refs"]["approval_status"] == "PENDING"
-        assert regenerated_card["payload"]["weekly_minutes"] == 150
+        assert regenerated_card["payload"]["plans"][0]["weekly_minutes"] == 127
         stale = await client.post(
             f"/v1/approvals/{adjustment_approval}/decisions",
             headers=headers,
@@ -522,15 +527,15 @@ async def test_complete_mock_login_plan_approval_task_file_and_governance_flow(
                 "feedback": None,
             },
         )
-        assert stale.status_code == 409
-        assert stale.json()["error"]["details"]["current_approval_version"] == 2
+        assert stale.status_code == 200
+        assert stale.json()["status"] == "EDITED"
         rejected = await client.post(
-            f"/v1/approvals/{adjustment_approval}/decisions",
+            f"/v1/approvals/{regenerated_approval}/decisions",
             headers=headers,
             json={
                 "schema_version": "1.0",
-                "approval_id": adjustment_approval,
-                "expected_approval_version": 2,
+                "approval_id": regenerated_approval,
+                "expected_approval_version": 1,
                 "action": "REJECT",
                 "feedback": None,
             },

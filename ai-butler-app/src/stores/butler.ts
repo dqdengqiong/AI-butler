@@ -392,7 +392,7 @@ export const useButlerStore = defineStore('butler', () => {
       }
       throw reason
     }
-    item.status = action === 'APPROVE' ? 'approved' : action === 'EDIT' ? 'editing' : 'approved'
+    item.status = action === 'APPROVE' ? 'approved' : action === 'EDIT' ? 'editing' : 'rejected'
     const runId = stringValue(response, 'run_id')
     if (runId) {
       const conversationId = activeConversationId.value

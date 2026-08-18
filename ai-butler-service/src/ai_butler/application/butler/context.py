@@ -13,6 +13,7 @@ from ai_butler.adapters.embedding import EmbeddingProvider
 from ai_butler.adapters.llm import LLM
 from ai_butler.adapters.model_audit import DatabaseModelInvocationRecorder
 from ai_butler.adapters.model_routing import load_model_routing
+from ai_butler.adapters.notification import NotificationProvider, RecordingNotificationProvider
 from ai_butler.adapters.search import SearchProvider
 from ai_butler.adapters.sms import MockSmsProvider, SmsProvider
 from ai_butler.adapters.vector import QdrantVectorStore, VectorStore
@@ -34,11 +35,14 @@ class ButlerContext:
     search_provider: SearchProvider
     embedding_provider: EmbeddingProvider
     vector_store: VectorStore
+    llm: LLM
+    research_input_tokens: int
     availability_interpreter: AvailabilityInterpreter
     conversation_router: ConversationRouter
     evidence_gate: EvidenceGate
     sms_provider: SmsProvider
     phone_cipher: PhoneCipher
+    notification_provider: NotificationProvider
 
     @classmethod
     def build(
@@ -51,6 +55,7 @@ class ButlerContext:
         llm: LLM | None = None,
         sms_provider: SmsProvider | None = None,
         conversation_router: ConversationRouter | None = None,
+        notification_provider: NotificationProvider | None = None,
     ) -> ButlerContext:
         invocation_recorder = DatabaseModelInvocationRecorder(database)
         routing = (
@@ -68,6 +73,11 @@ class ButlerContext:
             resolved_embedding.dimensions,
         )
         resolved_llm = llm or build_llm(settings, invocation_recorder, routing)
+        research_input_tokens = (
+            routing.routes["research"].max_input_tokens
+            if routing is not None
+            else settings.rag_evidence_max_tokens + settings.rag_token_safety_margin + 4096
+        )
         resolved_router = conversation_router or (
             FakeConversationRouter()
             if not settings.model_routing_enabled
@@ -81,9 +91,12 @@ class ButlerContext:
             search_provider=resolved_search,
             embedding_provider=resolved_embedding,
             vector_store=resolved_vector,
+            llm=resolved_llm,
+            research_input_tokens=research_input_tokens,
             availability_interpreter=AvailabilityInterpreter(resolved_llm),
             conversation_router=resolved_router,
             evidence_gate=EvidenceGate(tuple(settings.official_source_domains)),
             sms_provider=sms_provider or MockSmsProvider(),
             phone_cipher=PhoneCipher(settings.phone_encryption_secret),
+            notification_provider=notification_provider or RecordingNotificationProvider(),
         )

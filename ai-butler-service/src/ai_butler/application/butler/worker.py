@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from uuid import UUID
 
 from sqlalchemy import text
@@ -10,9 +11,12 @@ from .completion import CompletionService
 from .context import ButlerContext
 from .events import EventService
 from .executor import RunExecutor
+from .graph import ButlerGraphRuntime
 from .shared import (
     _row,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class WorkerService:
@@ -26,7 +30,7 @@ class WorkerService:
         self.database = context.database
         self.settings = context.settings
         self._append_event = events._append_event
-        self._execute_run = executor._execute_run
+        self._graph = ButlerGraphRuntime(context, executor)
         self._fail_run = completion._fail_run
 
     async def worker_poll_once(self, worker_id: UUID) -> bool:
@@ -69,10 +73,11 @@ class WorkerService:
                 run["attempt"],
             )
         try:
-            await self._execute_run(UUID(str(run["id"])))
+            await self._graph.run(UUID(str(run["id"])))
         except ButlerError as exc:
             await self._fail_run(UUID(str(run["id"])), exc)
         except Exception:
+            logger.exception("agent run failed", extra={"run_id": str(run["id"])})
             await self._fail_run(
                 UUID(str(run["id"])),
                 ButlerError("AGENT_INTERNAL_ERROR", "管家暂时无法完成处理", 500, True),

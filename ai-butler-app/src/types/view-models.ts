@@ -108,10 +108,19 @@ export type ChatItem =
   | {
       key: string
       kind: 'plan'
+      schemaVersion: '1.0' | '1.1'
+      mode: string
       title: string
       description: string
       weeklyMinutes: number
-      status: 'pending' | 'approved' | 'editing'
+      plans: {
+        key: string
+        title: string
+        description: string
+        weeklyMinutes: number
+      }[]
+      warnings: string[]
+      status: 'pending' | 'approved' | 'editing' | 'rejected'
       approvalId: string
       approvalVersion: number
     }

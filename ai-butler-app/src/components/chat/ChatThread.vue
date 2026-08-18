@@ -13,6 +13,7 @@ defineEmits<{
   submitSelection: [itemKey: string]
   approvePlan: [item: PlanItem]
   editPlan: [item: PlanItem]
+  rejectPlan: [item: PlanItem]
   openSource: [citationId: string]
 }>()
 </script>
@@ -35,6 +36,7 @@ defineEmits<{
         :item="item"
         @approve="(plan) => $emit('approvePlan', plan)"
         @edit="(plan) => $emit('editPlan', plan)"
+        @reject="(plan) => $emit('rejectPlan', plan)"
       />
       <ChatSourceCard
         v-else-if="item.kind === 'source'"

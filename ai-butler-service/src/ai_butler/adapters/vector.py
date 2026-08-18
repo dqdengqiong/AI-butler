@@ -22,14 +22,27 @@ class VectorPoint:
     chunk_id: UUID
 
 
+@dataclass(frozen=True, slots=True)
+class VectorSearchHit:
+    """向量召回候选；授权仍必须由 PostgreSQL 事实二次确认。"""
+
+    chunk_id: UUID
+    document_id: UUID
+    score: float
+
+
 class VectorStore(Protocol):
     """私有资料向量边界，tenant_id 必须来自服务端用户上下文。"""
 
     async def upsert(self, points: tuple[VectorPoint, ...]) -> None: ...
 
     async def search(
-        self, tenant_id: UUID, vector: list[float], limit: int
-    ) -> tuple[UUID, ...]: ...
+        self,
+        tenant_id: UUID,
+        vector: list[float],
+        limit: int,
+        document_ids: tuple[UUID, ...] = (),
+    ) -> tuple[VectorSearchHit, ...]: ...
 
     async def delete_document(self, tenant_id: UUID, document_id: UUID) -> None: ...
 
@@ -76,6 +89,17 @@ class QdrantVectorStore:
             f"/collections/{self._collection}",
             {"vectors": {"size": self._dimensions, "distance": "Cosine"}},
         )
+        for field_name in ("tenant_id", "document_id"):
+            await self._request(
+                "PUT",
+                f"/collections/{self._collection}/index?wait=true",
+                {"field_name": field_name, "field_schema": "keyword"},
+            )
+
+    async def setup(self) -> None:
+        """创建 collection 和租户过滤所需 payload 索引。"""
+
+        await self._ensure_collection()
 
     async def upsert(self, points: tuple[VectorPoint, ...]) -> None:
         if not points:
@@ -100,30 +124,54 @@ class QdrantVectorStore:
             },
         )
 
-    async def search(self, tenant_id: UUID, vector: list[float], limit: int) -> tuple[UUID, ...]:
+    async def search(
+        self,
+        tenant_id: UUID,
+        vector: list[float],
+        limit: int,
+        document_ids: tuple[UUID, ...] = (),
+    ) -> tuple[VectorSearchHit, ...]:
         await self._ensure_collection()
+        must: list[dict[str, object]] = [{"key": "tenant_id", "match": {"value": str(tenant_id)}}]
+        if document_ids:
+            must.append(
+                {
+                    "key": "document_id",
+                    "match": {"any": [str(document_id) for document_id in document_ids]},
+                }
+            )
         body = await self._request(
             "POST",
             f"/collections/{self._collection}/points/query",
             {
                 "query": vector,
-                "filter": {"must": [{"key": "tenant_id", "match": {"value": str(tenant_id)}}]},
+                "filter": {"must": must},
                 "limit": limit,
                 "with_payload": True,
             },
         )
         result = body.get("result")
         points = result.get("points", []) if isinstance(result, dict) else []
-        chunk_ids: list[UUID] = []
+        hits: list[VectorSearchHit] = []
         for point in points:
             if not isinstance(point, dict) or not isinstance(point.get("payload"), dict):
                 continue
             chunk_id = point["payload"].get("chunk_id")
+            document_id = point["payload"].get("document_id")
+            score = point.get("score")
             try:
-                chunk_ids.append(UUID(str(chunk_id)))
+                if not isinstance(score, int | float):
+                    continue
+                hits.append(
+                    VectorSearchHit(
+                        chunk_id=UUID(str(chunk_id)),
+                        document_id=UUID(str(document_id)),
+                        score=float(score),
+                    )
+                )
             except (TypeError, ValueError):
                 continue
-        return tuple(chunk_ids)
+        return tuple(hits)
 
     async def delete_document(self, tenant_id: UUID, document_id: UUID) -> None:
         await self._ensure_collection()

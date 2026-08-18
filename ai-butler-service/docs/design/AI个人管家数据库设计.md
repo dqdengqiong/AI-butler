@@ -1,4 +1,6 @@
-# AI个人管家数据库设计文档 V2.5
+# AI个人管家数据库设计文档 V3.0
+
+> V3.0 验证环境采用全新基线：Alembic 目录只保留 `0001_initial_schema.py`，不提供旧库升级、字段回填、兼容视图或数据恢复。本文字段、状态和约束必须与该初始迁移及运行查询同步变更。
 
 ## 1. 目标与存储边界
 
@@ -382,8 +384,7 @@ PostgreSQL 是业务事实唯一来源；外围存储失败时通过状态字段
 - `trigger_message_id` 唯一，保证作为初始触发消息的 User 消息最多创建一个 run；后续输入恢复消息关联同一 run，但不写入该字段。
 - `trace_id` 唯一并在 run 生命周期内不可变；所有 span 必须复用该值。
 - Token、尝试次数和 `last_event_sequence` 不得为负。
-- 终态 `SUCCEEDED`、`FAILED_FINAL`、`CANCELLED` 要求 `completed_at` 非空。
-- `CANCEL_REQUESTED` 要求 `cancel_requested_at` 非空。
+- `attempt`、Token 和 `last_event_sequence` 从 0 开始且不得为负；终态时间由应用事务写入，不依赖延迟触发器。
 - 部分唯一索引：`conversation_id`，仅状态为 `QUEUED`、`RUNNING`、`AWAITING_INPUT`、`AWAITING_APPROVAL`、`FAILED_RETRYABLE`、`CANCEL_REQUESTED` 时生效，保证一个会话最多一个活动 run。
 - `user_id` 部分唯一索引只覆盖 `QUEUED`、`RUNNING`、`CANCEL_REQUESTED`，保证用户全局最多一个真正执行中的 run；等待输入、待审批和待重试可跨会话并存。
 - Worker 领取索引：`(status, lease_expires_at, created_at)`；查询仍需使用 `FOR UPDATE SKIP LOCKED`。
@@ -412,7 +413,7 @@ PostgreSQL 是业务事实唯一来源；外围存储失败时通过状态字段
 | `agent_run_id` | `uuid` | 否 | 外键 → `agent_runs.id`，删除级联 |
 | `user_id` | `uuid` | 否 | 外键 → `users.id`，删除级联，便于隔离和清理 |
 | `sequence` | `integer` | 否 | run 内从 1 单调递增 |
-| `attempt` | `smallint` | 否 | 默认 1，对应本次重试 attempt |
+| `attempt` | `smallint` | 否 | 默认 0，对应本次重试 attempt |
 | `event_type` | `varchar(32)` | 否 | 允许值见下方 |
 | `payload` | `jsonb` | 否 | 默认 `{}`，版本化展示数据 |
 | `created_at` | `timestamptz` | 否 | 默认 `now()` |
@@ -434,7 +435,7 @@ PostgreSQL 是业务事实唯一来源；外围存储失败时通过状态字段
 约束与索引：
 
 - 唯一约束：`(agent_run_id, sequence)`。
-- `sequence > 0`、`attempt > 0`。
+- `sequence > 0`、`attempt >= 0`。
 - 读取索引：`(agent_run_id, sequence)`。
 - 清理索引：`created_at`。
 - `heartbeat` 不持久化，也不占用 sequence。
@@ -917,7 +918,7 @@ Qdrant `tenant_id` 映射：公共文档写入字符串 `public`；私有文档�
 | `payload` | `jsonb` | 否 | 模板参数，不保存密钥 |
 | `status` | `varchar(16)` | 否 | `PENDING`、`PROCESSING`、`SENT`、`RETRY`、`CANCELLED`、`DEAD` |
 | `attempt_count` | `smallint` | 否 | 默认 0 |
-| `max_attempts` | `smallint` | 否 | 默认 3，1–10 |
+| `max_attempts` | `smallint` | 否 | 默认 4；首次尝试失败后最多按 1、5、30 分钟重试三次 |
 | `next_attempt_at` | `timestamptz` | 是 | 重试时间 |
 | `provider_message_id` | `varchar(255)` | 是 | 渠道响应 ID |
 | `idempotency_key` | `varchar(255)` | 否 | 业务幂等键 |
@@ -931,8 +932,18 @@ Qdrant `tenant_id` 映射：公共文档写入字符串 `public`；私有文档�
 - `idempotency_key` 全局唯一。
 - `attempt_count >= 0`，`max_attempts BETWEEN 1 AND 10`。
 - `SENT` 要求 `sent_at` 非空。
-- Worker 领取索引：`(status, COALESCE(next_attempt_at, scheduled_at))`，实现时使用适合查询的表达式或拆分索引。
+- Worker 只领取到期的 `PENDING/RETRY` 或超时 `RUNNING` 作业；第四次失败进入 `DEAD`。
 - 查询索引：`(user_id, created_at DESC)`、`task_id`。
+
+### 8.3 `account_deletion_jobs`
+
+保存账号跨存储删除状态机，保证任一步失败后能够从当前步骤继续，而不是重新暴露账号。关键字段为 `user_id`（唯一）、`status`、`current_step`、`attempt_count`、`next_attempt_at`、`lease_expires_at`、`error_code` 和时间戳。
+
+- `status` 只允许 `PENDING`、`RUNNING`、`RETRY`、`SUCCEEDED`、`DEAD`。
+- `current_step` 按 `CANCEL_WORK → CHECKPOINT → STORE → QDRANT → OBJECTS → BUSINESS → DONE` 单向推进。
+- 作业未成功时 `users.status` 保持 `DELETING`，认证依赖每次重读用户与会话状态。
+- Qdrant 删除完成前知识文档保持不可检索；入库 Worker 只处理 `ACTIVE` 用户，禁止删除中的文件重新生成向量。
+- 成功后只保留不可识别的用户墓碑和删除作业结果。
 
 ## 9. 关系总览
 
@@ -1145,6 +1156,7 @@ Worker 崩溃后，lease 到期的 run 可由其他 Worker 重新领取并从 La
 - `knowledge_documents`、`knowledge_chunks`
 - `claims`、`citations`
 - `stored_files`、`notification_jobs`
+- `account_deletion_jobs`、`model_invocations`
 - LangGraph 官方 PostgreSQL Checkpointer/Store 内部表及 pgvector 扩展
 
 ### 14.2 后续按需增加
@@ -1157,17 +1169,18 @@ Worker 崩溃后，lease 到期的 run 可由其他 Worker 重新领取并从 La
 
 不得提前创建没有明确查询、生命周期和数据所有者的扩展表。
 
-## 15. 建表与迁移顺序
+## 15. 全新基线与重建顺序
 
-1. `users`、`user_identities`、`auth_sessions`、`user_profiles`、`study_availability`
-2. `agent_definitions`、`user_agents`
-3. `conversations`、`conversation_segments`、`conversation_summaries`、`messages`、`agent_runs`、`agent_run_events`、`agent_trace_spans`，再补聊天循环外键
-4. `memory_policy_state`、`memory_extraction_jobs`、`memory_tombstones`、`memory_audit_records`
-5. `goals`、`plans`、`plan_revisions`、`approval_decisions`、`approval_decision_items`
-6. `plan_stages`、`plan_task_templates`、`tasks`、`task_executions`
-7. `knowledge_documents`、`knowledge_chunks`、`claims`、`citations`
-8. `stored_files`、`message_attachments`、`notification_jobs`，再补附件、头像外键
-9. 启用 pgvector，安装并迁移 LangGraph PostgreSQL Checkpointer/Store
-10. 创建索引、触发器、最小权限角色和测试数据
+业务 Schema 由唯一的 `0001_initial_schema.py` 一次建立用户、会话、run/event/trace、记忆作业、计划审批、任务通知、知识引用、文件和删除作业，以及完整外键、CHECK、部分唯一索引和最小运行角色权限。
 
-每次迁移必须同时提供向前迁移、回滚或前滚补救说明，以及约束和索引的自动化验证。
+验证环境重建顺序固定为：
+
+1. 显式校验 `APP_ENV` 为 `development/test` 及确认值 `DELETE_ALL_VERIFICATION_DATA`。
+2. 停止 API、Agent Worker 和 Scheduler Worker，删除明确命名的 Compose 数据卷。
+3. 创建业务库、测试库和独立 LangGraph 库，启用 pgvector。
+4. 对空业务库执行唯一初始迁移；重复执行 `upgrade head` 必须为空操作。
+5. 使用官方 setup 初始化 AsyncPostgresSaver/PostgresStore 表，并授予 `butler_app/butler_test` 最小运行权限。
+6. 创建 Qdrant collection 及 `tenant_id/document_id` payload index。
+7. 只导入明确标注的合成用户和公共知识种子。
+
+staging/production 禁止执行验证重置。后续如进入真实数据环境，必须另行制定新迁移策略，不能沿用此全量删除约定。

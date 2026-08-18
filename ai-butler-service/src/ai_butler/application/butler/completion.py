@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import hashlib
 from typing import Any
 from uuid import UUID, uuid4
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from ai_butler.agent.evidence import estimate_tokens
 from ai_butler.domain.errors import ButlerError
 
 from .context import ButlerContext
@@ -39,7 +41,7 @@ class CompletionService:
             {
                 "content": response,
                 "structured": _json(structured),
-                "id": run["response_message_id"],
+                "id": run["pending_response_message_id"],
             },
         )
         await connection.execute(
@@ -52,7 +54,7 @@ class CompletionService:
             run["user_id"],
             "message.completed",
             {
-                "message_id": str(run["response_message_id"]),
+                "message_id": str(run["pending_response_message_id"]),
                 "content": response,
                 "cards": cards or [],
             },
@@ -90,7 +92,7 @@ class CompletionService:
             )
             await connection.execute(
                 text("UPDATE messages SET status='FAILED',updated_at=now() WHERE id=:id"),
-                {"id": run["response_message_id"]},
+                {"id": run["pending_response_message_id"]},
             )
             await self._append_event(
                 connection,
@@ -104,19 +106,22 @@ class CompletionService:
     async def _maybe_archive_segment(
         self, connection: AsyncConnection, run: dict[str, Any]
     ) -> None:
-        total_chars = int(
+        contents = (
             (
                 await connection.execute(
                     text(
-                        "SELECT COALESCE(SUM(length(content)),0) FROM messages WHERE segment_id=:segment"
+                        "SELECT content FROM messages WHERE segment_id=:segment ORDER BY created_at,id"
                     ),
                     {"segment": run["segment_id"]},
                 )
-            ).scalar_one()
+            )
+            .scalars()
+            .all()
         )
-        estimated = max(1, total_chars // 2)
+        estimated = sum(estimate_tokens(str(content)) for content in contents)
+        estimated += 256  # system facts, card metadata and model output reserve
         await connection.execute(
-            text("UPDATE conversation_segments SET estimated_tokens=:tokens WHERE id=:id"),
+            text("UPDATE conversation_segments SET estimated_context_tokens=:tokens WHERE id=:id"),
             {"tokens": estimated, "id": run["segment_id"]},
         )
         hard = int(self.settings.context_window_tokens * self.settings.context_hard_limit_ratio)
@@ -124,11 +129,12 @@ class CompletionService:
         if estimated >= soft:
             await connection.execute(
                 text(
-                    "INSERT INTO conversation_summaries(id,conversation_id,segment_id,summary_type,version,content,"
-                    "source_message_count,token_count) VALUES(:id,:conversation,:segment,'INCREMENTAL',1,"
-                    "CAST(:content AS jsonb),(SELECT COUNT(*) FROM messages WHERE segment_id=:segment),:tokens) "
-                    "ON CONFLICT(conversation_id,segment_id,summary_type,version) DO UPDATE SET content=EXCLUDED.content,"
-                    "source_message_count=EXCLUDED.source_message_count,token_count=EXCLUDED.token_count"
+                    "INSERT INTO conversation_summaries(id,conversation_id,segment_id,summary_type,version,"
+                    "summary_data,source_hash,prompt_version,token_count) VALUES(:id,:conversation,:segment,"
+                    "'INCREMENTAL',1,CAST(:content AS jsonb),:source_hash,'summary-v1',:tokens) "
+                    "ON CONFLICT(conversation_id,summary_type,version) DO UPDATE SET "
+                    "summary_data=EXCLUDED.summary_data,source_hash=EXCLUDED.source_hash,"
+                    "token_count=EXCLUDED.token_count"
                 ),
                 {
                     "id": uuid4(),
@@ -137,6 +143,9 @@ class CompletionService:
                     "content": _json(
                         {"summary": "验证版确定性摘要", "source_segment_id": str(run["segment_id"])}
                     ),
+                    "source_hash": hashlib.sha256(
+                        f"{run['segment_id']}:{estimated}".encode()
+                    ).hexdigest(),
                     "tokens": min(1500, estimated // 10),
                 },
             )
@@ -150,13 +159,84 @@ class CompletionService:
         )
         if conversation is None or conversation["active_segment_id"] != run["segment_id"]:
             return
+        final_summary_id = uuid4()
+        final_version = int(conversation["context_version"])
+        final_hash = hashlib.sha256(f"final:{run['segment_id']}:{estimated}".encode()).hexdigest()
+        await connection.execute(
+            text(
+                "INSERT INTO conversation_summaries(id,conversation_id,segment_id,summary_type,version,"
+                "summary_data,source_hash,prompt_version,token_count) VALUES(:id,:conversation,:segment,"
+                "'SEGMENT_FINAL',:version,CAST(:content AS jsonb),:source_hash,'summary-v1',:tokens) "
+                "ON CONFLICT(conversation_id,summary_type,version) DO NOTHING"
+            ),
+            {
+                "id": final_summary_id,
+                "conversation": run["conversation_id"],
+                "segment": run["segment_id"],
+                "version": final_version,
+                "content": _json(
+                    {
+                        "summary": "验证版终态交接摘要",
+                        "memory_refs": [],
+                        "source_segment_id": str(run["segment_id"]),
+                    }
+                ),
+                "source_hash": final_hash,
+                "tokens": min(1500, max(1, estimated // 10)),
+            },
+        )
+        final_summary_id = UUID(
+            str(
+                (
+                    await connection.execute(
+                        text(
+                            "SELECT id FROM conversation_summaries WHERE conversation_id=:conversation "
+                            "AND summary_type='SEGMENT_FINAL' AND version=:version"
+                        ),
+                        {"conversation": run["conversation_id"], "version": final_version},
+                    )
+                ).scalar_one()
+            )
+        )
+        handoff_id = uuid4()
+        handoff_version = final_version
+        handoff_hash = hashlib.sha256(
+            f"handoff:{run['conversation_id']}:{handoff_version}:{final_summary_id}".encode()
+        ).hexdigest()
+        await connection.execute(
+            text(
+                "INSERT INTO conversation_summaries(id,conversation_id,segment_id,summary_type,version,"
+                "summary_data,source_hash,prompt_version,token_count) VALUES(:id,:conversation,:segment,"
+                "'CUMULATIVE_HANDOFF',:version,CAST(:content AS jsonb),:source_hash,'summary-v1',:tokens)"
+            ),
+            {
+                "id": handoff_id,
+                "conversation": run["conversation_id"],
+                "segment": run["segment_id"],
+                "version": handoff_version,
+                "content": _json(
+                    {
+                        "summary": "累计交接摘要",
+                        "memory_refs": [],
+                        "final_summary_id": str(final_summary_id),
+                    }
+                ),
+                "source_hash": handoff_hash,
+                "tokens": min(1800, max(1, estimated // 8)),
+            },
+        )
         new_segment = uuid4()
         new_sequence = conversation["context_version"] + 1
         await connection.execute(
             text(
-                "UPDATE conversation_segments SET status='ARCHIVED',archived_at=now() WHERE id=:id"
+                "UPDATE conversation_segments SET status='ARCHIVING',end_message_id=:message,"
+                "final_summary_id=:summary WHERE id=:id"
             ),
-            {"id": run["segment_id"]},
+            {
+                "id": run["segment_id"],
+                "message": run["pending_response_message_id"],
+                "summary": final_summary_id,
+            },
         )
         await connection.execute(
             text(
@@ -173,7 +253,19 @@ class CompletionService:
         )
         await connection.execute(
             text(
-                "UPDATE conversations SET active_segment_id=:segment,context_version=:version,updated_at=now() WHERE id=:id"
+                "UPDATE conversations SET active_segment_id=:segment,context_version=:version,"
+                "latest_handoff_summary_id=:handoff,updated_at=now() WHERE id=:id"
             ),
-            {"segment": new_segment, "version": new_sequence, "id": run["conversation_id"]},
+            {
+                "segment": new_segment,
+                "version": new_sequence,
+                "handoff": handoff_id,
+                "id": run["conversation_id"],
+            },
+        )
+        await connection.execute(
+            text(
+                "UPDATE conversation_segments SET status='ARCHIVED',archived_at=now() WHERE id=:id"
+            ),
+            {"id": run["segment_id"]},
         )
