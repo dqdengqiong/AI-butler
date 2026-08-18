@@ -1,4 +1,4 @@
-# AI个人管家聊天系统设计文档 V1.3
+# AI个人管家聊天系统设计文档 V3.0
 
 ## 1. 文档目标
 
@@ -358,7 +358,7 @@ async def run_events(run_id: UUID, cursor: int, principal: Principal):
 }
 ```
 
-允许的 V1 卡片：
+允许的卡片：
 
 | 类型 | 必需实体 | 用途 | 允许动作 |
 | --- | --- | --- | --- |
@@ -369,21 +369,56 @@ async def run_events(run_id: UUID, cursor: int, principal: Principal):
 
 动作对象至少包含 `action_id`、`action_type`、`label` 和执行所需的稳定实体 ID。客户端不得根据标题或按钮文案反推业务操作。未知 `schema_version` 或 `card_type` 时回退为只读文本，不展示可写按钮。
 
-`PlanCard` 示例：
+新输出的 `PlanCard 1.1` 示例：
 
 ```json
 {
-  "schema_version": "1.0",
+  "schema_version": "1.1",
   "card_id": "uuid",
   "card_type": "PlanCard",
   "entity_refs": {
     "approval_id": "uuid",
     "approval_version": 1,
     "items": [
-      {"plan_revision_id":"uuid","expected_current_revision_id":null}
+      {
+        "work_item_id":"work-1",
+        "plan_id":"plan-1-uuid",
+        "plan_revision_id":"revision-1-uuid",
+        "expected_current_revision_id":null
+      },
+      {
+        "work_item_id":"work-2",
+        "plan_id":"plan-2-uuid",
+        "plan_revision_id":"revision-2-uuid",
+        "expected_current_revision_id":null
+      }
     ]
   },
-  "payload": {"mode":"BUNDLE_CREATE","plans":[]},
+  "payload": {
+    "mode":"BUNDLE_CREATE",
+    "title":"组合计划草案",
+    "plans":[
+      {
+        "work_item_id":"work-1",
+        "plan_id":"plan-1-uuid",
+        "plan_revision_id":"revision-1-uuid",
+        "title":"行测计划",
+        "objective_summary":"四周行测训练",
+        "weekly_minutes":240
+      },
+      {
+        "work_item_id":"work-2",
+        "plan_id":"plan-2-uuid",
+        "plan_revision_id":"revision-2-uuid",
+        "title":"申论计划",
+        "objective_summary":"四周申论训练",
+        "weekly_minutes":180
+      }
+    ],
+    "total_weekly_minutes":420,
+    "available_weekly_minutes":500,
+    "warnings":[]
+  },
   "actions": [
     {"action_id":"approve","action_type":"APPROVE","label":"确认并创建"},
     {"action_id":"edit","action_type":"EDIT","label":"继续修改"},
@@ -392,7 +427,7 @@ async def run_events(run_id: UUID, cursor: int, principal: Principal):
 }
 ```
 
-调整卡的 `payload.mode` 为 `SINGLE_PLAN_ADJUST`，且 `items` 必须恰好一项。组合新建卡可有多项。`SelectionCard` 提交计划选择后，服务端再次校验候选计划属于当前用户且仍为活动状态。
+调整卡的 `payload.mode` 为 `SINGLE_PLAN_ADJUST`，且 `items` 与 `plans` 必须各恰好一项；`BUNDLE_CREATE` 至少两项。客户端兼容展示历史 PlanCard 1.0；服务端只产生 1.1。未知版本或非法基数统一降级为只读状态，不渲染审批按钮。`SelectionCard` 提交计划选择后，服务端再次校验候选计划属于当前用户且仍为活动状态。
 
 ### 5.7 聊天错误码
 

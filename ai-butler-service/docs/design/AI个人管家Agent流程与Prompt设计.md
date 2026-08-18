@@ -1,4 +1,6 @@
-# AI个人管家 Agent 流程与 Prompt 设计文档 V2.5
+# AI个人管家 Agent 流程与 Prompt 设计文档 V3.0
+
+> 当前实现固定 `butler-graph-v2`、`butler-prompts-v2`、capability registry 版本及 fingerprint 到每个 run；等待输入、审批和重试均使用创建时版本恢复。
 
 ## 1. 设计目标
 
@@ -917,7 +919,7 @@ Response 节点输出展示结构，不作为数据库副作用指令。
 | 审批重复提交 | 返回原终态 | 0 | 不重复恢复 |
 | 审批冲突提交 | `409` | 0 | 要求刷新 |
 | 任务写入后图失败 | 读取幂等键并跳过已完成写入 | 直到恢复 | 不重复任务 |
-| 通知失败 | Worker 退避重试 | 默认 3 | 进入 `DEAD` 并告警 |
+| 通知失败 | Worker 按 1、5、30 分钟退避 | 首次发送 + 3 次重试 | 第四次失败进入 `DEAD` 并告警 |
 | SSE/页面断开 | run 继续，客户端按 sequence 续传 | 自动重连 | 不取消 run、不重复文本 |
 | Worker heartbeat 超时 | lease 到期后从 checkpoint 重新领取 | 直到恢复或转最终失败 | 不重复副作用 |
 | 用户取消 run | 运行中先置 `CANCEL_REQUESTED`；排队/等待态直接安全终止 | 0 | `CANCELLED` |
@@ -993,19 +995,11 @@ Prompt 更新必须：
 | T-04 | 等待审批的 run 遇到 registry 升级 | 使用原 fingerprint 恢复，不绑定新工具 |
 | T-05 | replay 尝试发布计划或访问公网 | Permission Gate 以 `REPLAY_READ_ONLY` 拒绝 |
 
-## 20. MVP 实现顺序
+## 20. V3.0 实现基线
 
-1. State、`ContextBundleV1`、`ToolLoopStateV1`、统一结果信封和 Schema 校验框架
-2. run 队列、消息占位、Response 流式投影和断线续传
-3. Token 预算、两级摘要、segment 归档和 thread 轮换
-4. Memory Candidate/Policy/Relation Schema、PostgresStore、检索和遗忘命令
-5. Router、Profile 与输入中断
-6. Research 确定性 capability facade、Qdrant 检索和 Claim/Citation
-7. Planner、确定性校验和 Evidence Gate
-8. revision 草稿持久化、Approval interrupt 与恢复
-9. Executor、Feedback/Adjust、基准集、安全指标和版本回滚
+State/Context、PostgreSQL run 队列、SSE、上下文轮换、PostgresStore 记忆、Router/Profile、Research/Claim/Citation、Planner/Review/Evidence Gate、Approval interrupt、Executor 和 Feedback/Adjust 属于同一发布单元。LangGraph 只编排状态和恢复位置，计划发布、任务物化、通知与删除等事务继续由确定性应用服务执行。
 
-每一步都必须先通过正常路径、失败路径和重启恢复测试，再连接下一个节点。
+节点或 Prompt 变更必须同时更新版本快照、Schema、固定基准集和安全评测；不得只替换默认 Prompt 后让等待中的 run 自动升级。
 
 ## 21. 聊天运行与流式投影
 

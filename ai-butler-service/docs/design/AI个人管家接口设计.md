@@ -587,7 +587,7 @@ POST /v1/tasks/{task_id}/executions
 
 ```json
 {
-  "schema_version": "1.1",
+  "schema_version": "1.0",
   "client_execution_id": "0190...",
   "result": "COMPLETED",
   "duration_minutes": 38,
@@ -832,7 +832,7 @@ POST /v1/agent-runs/{run_id}/retry
 
 ```json
 {
-  "schema_version": "1.0",
+  "schema_version": "1.1",
   "card_id": "uuid",
   "card_type": "PlanCard",
   "entity_refs": {

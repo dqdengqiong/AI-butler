@@ -66,7 +66,7 @@ PostgreSQL       Qdrant
 - 应用服务器：4 核 CPU、8 GB–16 GB 内存
 - 数据库：PostgreSQL 独立部署
 - 向量数据库：Qdrant 独立部署
-- 任务系统：Redis + Celery
+- 任务系统：默认继续使用 PostgreSQL；只有作业持续积压并影响量化 SLO 时才引入 Redis + Celery
 - 文件：对象存储
 
 预计成本：约 300–1,000 元/月。
@@ -82,7 +82,7 @@ PostgreSQL       Qdrant
 3. Agent 服务
 4. PostgreSQL 数据库
 5. Qdrant 向量数据库
-6. Redis 任务队列
+6. 可选 Redis 任务队列（仅在 PostgreSQL 队列容量数据证明必要时）
 7. 文件存储
 
 增加：
