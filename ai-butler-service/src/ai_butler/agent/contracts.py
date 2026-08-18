@@ -19,7 +19,7 @@ class ContextItemV1(BaseModel):
 
 
 class ContextBundleV1(BaseModel):
-    """节点只消费预算内上下文；身份与审批事实不可由模型生成。"""
+    """节点只消费预算内上下文；身份与业务事实不可由模型生成。"""
 
     schema_version: Literal["1.0"] = "1.0"
     user_id: UUID
@@ -41,7 +41,7 @@ class ToolLoopStateV1(BaseModel):
 
 
 class AgentStateV1(BaseModel):
-    """checkpoint 中只保存恢复所需状态，不代替 PostgreSQL 业务事实。"""
+    """checkpoint 中只保存单轮 run 的结构化路由状态。"""
 
     schema_version: Literal["1.0"] = "1.0"
     run_id: UUID
@@ -49,11 +49,10 @@ class AgentStateV1(BaseModel):
     conversation_id: UUID
     segment_id: UUID
     thread_id: str
-    pending_action_key: str
     graph_version: str
     prompt_bundle_version: str
-    capability_registry_version: str
-    capability_registry_fingerprint: str
+    tool_registry_version: str
+    tool_registry_fingerprint: str
     intent: Literal["PLAN", "ADJUST", "QUESTION", "MEMORY", "UNKNOWN"] = "UNKNOWN"
     next_node: Literal[
         "Router",
@@ -62,8 +61,7 @@ class AgentStateV1(BaseModel):
         "Planner",
         "Review",
         "Evidence Gate",
-        "Approval",
-        "Executor",
+        "ToolExecutor",
         "Feedback/Adjust",
         "Response",
     ] = "Router"
@@ -73,7 +71,7 @@ class AgentStateV1(BaseModel):
     started_at: datetime
 
 
-class CapabilityResultMetaV1(BaseModel):
+class ToolResultMetaV1(BaseModel):
     schema_version: Literal["1.0"] = "1.0"
     request_id: str
     trust_level: Literal["SYSTEM_FACT", "USER_CONTENT", "EXTERNAL_UNTRUSTED"]
@@ -93,6 +91,9 @@ class IntentDecisionV1(BaseModel):
     intent: Literal[
         "GENERAL_CHAT",
         "CIVIL_QA",
+        "DAILY_PLANNING",
+        "PLAN_REVIEW",
+        "RESEARCH",
         "PLAN_CREATE",
         "PLAN_ADJUST",
         "TASK_FEEDBACK",
@@ -101,8 +102,17 @@ class IntentDecisionV1(BaseModel):
         "CLARIFY",
     ]
     confidence: float = Field(ge=0, le=1)
-    needs_web: bool = False
-    needs_private_knowledge: bool = False
+    context_needs: tuple[
+        Literal[
+            "PLAN_REQUIREMENTS",
+            "PLAN_CONTEXT",
+            "TASK_CONTEXT",
+            "PUBLIC_KNOWLEDGE",
+            "PRIVATE_KNOWLEDGE",
+            "MEMORY_COMMAND",
+        ],
+        ...,
+    ] = ()
     clarifying_question: str | None = Field(default=None, max_length=200)
 
     @model_validator(mode="after")
@@ -113,6 +123,8 @@ class IntentDecisionV1(BaseModel):
             raise ValueError("CLARIFY requires a clarifying question")
         if self.intent != "CLARIFY" and self.clarifying_question is not None:
             raise ValueError("clarifying question is only allowed for CLARIFY")
+        if len(set(self.context_needs)) != len(self.context_needs):
+            raise ValueError("context needs must be unique")
         return self
 
 
@@ -137,7 +149,7 @@ class FeedbackDecisionV1(BaseModel):
 
 
 class PlanTaskTemplateV1(BaseModel):
-    """Planner 生成的任务模板；具体任务必须在审批后由 Executor 展开。"""
+    """Planner 生成的任务模板；具体任务必须在用户确认后物化。"""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -172,7 +184,7 @@ class PlanStageV1(BaseModel):
 
 
 class PlanDraftV1(BaseModel):
-    """Planner 草稿；通过 Review 和用户审批前不代表有效计划。"""
+    """Planner 预览；通过 Review 和用户确认前不写入计划业务表。"""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -229,7 +241,14 @@ class PlanScopeV1(PlanScopeDraftV1):
     """Planner 唯一可消费的、已由用户确认的目标时间范围。"""
 
     target_date: date
-    period_source: Literal["EXPLICIT_DATE", "QUICK_WEEKS", "CUSTOM_DATE"]
+    period_source: Literal[
+        "EXPLICIT_DATE",
+        "RELATIVE_DAYS",
+        "RELATIVE_WEEKS",
+        "RELATIVE_MONTHS",
+        "QUICK_WEEKS",
+        "CUSTOM_DATE",
+    ]
 
     @model_validator(mode="after")
     def validate_period(self) -> PlanScopeV1:
@@ -304,7 +323,7 @@ class TaskDraftV1(BaseModel):
 
 
 class ExecutorResultV1(BaseModel):
-    """批准后任务展开结果；模型输出本身不具有写库授权。"""
+    """预览阶段的七日任务候选；最终确认前不具有写库授权。"""
 
     model_config = ConfigDict(extra="forbid")
 

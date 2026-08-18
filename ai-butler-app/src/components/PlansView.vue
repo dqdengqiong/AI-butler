@@ -6,17 +6,25 @@ import type { PlanViewModel, TaskViewModel } from '@/types/view-models'
 const props = defineProps<{
   plans: PlanViewModel[]
   tasks: TaskViewModel[]
+  deletingPlanId?: string | null
 }>()
 
 const emit = defineEmits<{
   completeTask: [taskKey: string]
   requestAdjustment: []
+  deletePlan: [planKey: string]
 }>()
 
 const activeFilter = ref<'all' | 'today' | 'week'>('all')
 const doneCount = computed(() => props.tasks.filter((task) => task.done).length)
 const totalMinutes = computed(() =>
   props.tasks.filter((task) => !task.done).reduce((sum, task) => sum + task.durationMinutes, 0),
+)
+const allTaskMinutes = computed(() =>
+  props.tasks.reduce((sum, task) => sum + task.durationMinutes, 0),
+)
+const todayLabel = computed(() =>
+  new Intl.DateTimeFormat('zh-CN', { month: '2-digit', day: '2-digit' }).format(new Date()),
 )
 </script>
 
@@ -38,23 +46,37 @@ const totalMinutes = computed(() =>
       </button>
     </view>
 
-    <view class="plan-card">
-      <view class="plan-top">
-        <view class="plan-icon">{{ plans[0]?.icon ?? '公' }}</view>
-        <view class="plan-copy">
-          <text class="plan-title">{{ plans[0]?.title ?? '公务员备考' }}</text>
-          <text class="plan-subtitle">{{ plans[0]?.subtitle ?? '基础阶段' }} · 已确认</text>
-        </view>
-        <text class="plan-badge">进行中</text>
-      </view>
-      <view class="progress-track">
-        <view class="progress-value" :style="{ width: `${plans[0]?.progress ?? 0}%` }" />
-      </view>
-      <view class="plan-meta">
-        <text>{{ plans[0]?.progressLabel }}</text>
-        <text>{{ plans[0]?.progress }}%</text>
-      </view>
+    <view v-if="!plans.length" class="empty-state">
+      <text class="empty-title">还没有计划</text>
+      <text class="empty-copy">去考公助理中描述目标、备考周期和时间安排，即可生成预览。</text>
     </view>
+    <template v-else>
+      <view v-for="plan in plans" :key="plan.key" class="plan-card">
+        <view class="plan-top">
+          <view class="plan-icon">{{ plan.icon }}</view>
+          <view class="plan-copy">
+            <text class="plan-title">{{ plan.title }}</text>
+            <text class="plan-subtitle">{{ plan.subtitle }} · 已确认</text>
+          </view>
+          <text class="plan-badge">{{ plan.statusLabel }}</text>
+          <button
+            class="delete-plan"
+            :disabled="deletingPlanId === plan.key"
+            aria-label="删除计划"
+            @click="emit('deletePlan', plan.key)"
+          >
+            {{ deletingPlanId === plan.key ? '删除中' : '删除' }}
+          </button>
+        </view>
+        <view class="progress-track">
+          <view class="progress-value" :style="{ width: `${plan.progress}%` }" />
+        </view>
+        <view class="plan-meta">
+          <text>{{ plan.progressLabel }}</text>
+          <text>{{ plan.progress }}%</text>
+        </view>
+      </view>
+    </template>
 
     <view v-if="totalMinutes > 90" class="schedule-alert">
       <view class="alert-icon">!</view>
@@ -65,10 +87,10 @@ const totalMinutes = computed(() =>
       <button class="alert-action" @click="emit('requestAdjustment')">让管家调整</button>
     </view>
 
-    <view class="task-card">
+    <view v-if="tasks.length" class="task-card">
       <view class="task-card-header">
         <view>
-          <text class="day-label">08月09日 · 今天</text>
+          <text class="day-label">{{ todayLabel }} · 今天</text>
           <text class="task-heading">今日任务</text>
         </view>
         <text class="task-count">{{ doneCount }} / {{ tasks.length }} 完成</text>
@@ -88,19 +110,23 @@ const totalMinutes = computed(() =>
         <text class="task-tag" :class="task.tone">公考</text>
       </view>
     </view>
+    <view v-else-if="plans.length" class="empty-state compact">
+      <text class="empty-title">今天没有待办任务</text>
+      <text class="empty-copy">滚动排期会按你的可学习时间持续补齐未来七天。</text>
+    </view>
 
-    <view class="week-summary">
+    <view v-if="tasks.length" class="week-summary">
       <view>
         <text class="summary-label">本周投入</text>
-        <text class="summary-value">3.5 小时</text>
+        <text class="summary-value">{{ Math.round((allTaskMinutes / 60) * 10) / 10 }} 小时</text>
       </view>
       <view>
         <text class="summary-label">已完成</text>
         <text class="summary-value">{{ doneCount }} 项</text>
       </view>
       <view>
-        <text class="summary-label">距目标</text>
-        <text class="summary-value">112 天</text>
+        <text class="summary-label">进行中计划</text>
+        <text class="summary-value">{{ plans.length }} 个</text>
       </view>
     </view>
 
@@ -152,6 +178,7 @@ const totalMinutes = computed(() =>
 
 .plan-card {
   padding: 28rpx;
+  margin-bottom: 20rpx;
 }
 
 .plan-top {
@@ -199,6 +226,48 @@ const totalMinutes = computed(() =>
   font-size: 19rpx;
   background: #eef0ff;
   border-radius: 999rpx;
+}
+
+.delete-plan {
+  flex: 0 0 auto;
+  min-width: 76rpx;
+  margin: 0;
+  padding: 0 12rpx;
+  color: #b14850;
+  font-size: 18rpx;
+  line-height: 52rpx;
+  background: #fff0f1;
+  border: 0;
+  border-radius: 16rpx;
+}
+
+.empty-state {
+  display: flex;
+  align-items: center;
+  gap: 12rpx;
+  margin-bottom: 24rpx;
+  padding: 56rpx 28rpx;
+  color: #7a8397;
+  background: #fff;
+  border: 1px solid #e5e9f1;
+  border-radius: 30rpx;
+  flex-direction: column;
+  text-align: center;
+}
+
+.empty-state.compact {
+  padding: 36rpx 28rpx;
+}
+
+.empty-title {
+  color: #2d3345;
+  font-size: 27rpx;
+  font-weight: 700;
+}
+
+.empty-copy {
+  font-size: 21rpx;
+  line-height: 1.6;
 }
 
 .progress-track {

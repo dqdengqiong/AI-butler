@@ -1,12 +1,11 @@
 <script setup lang="ts">
 import type { ChatItem } from '@/types/view-models'
 
-type PlanItem = Extract<ChatItem, { kind: 'plan' }>
+type PlanItem = Extract<ChatItem, { kind: 'planPreview' }>
 defineProps<{ item: PlanItem }>()
 defineEmits<{
-  approve: [item: PlanItem]
+  confirm: [item: PlanItem]
   edit: [item: PlanItem]
-  reject: [item: PlanItem]
 }>()
 </script>
 
@@ -14,44 +13,34 @@ defineEmits<{
   <view class="message-card">
     <view class="plan-heading">
       <view>
-        <text class="card-label">计划调整</text>
+        <text class="card-label">计划预览</text>
         <text class="card-title">{{ item.title }}</text>
       </view>
-      <text class="approval-pill" :class="item.status">
-        {{
-          item.status === 'approved'
-            ? '已确认'
-            : item.status === 'editing'
-              ? '修改中'
-              : item.status === 'rejected'
-                ? '已拒绝'
-                : '待确认'
-        }}
+      <text class="preview-pill" :class="item.status">
+        {{ item.status === 'CONFIRMED' ? '已确认' : item.status === 'READY' ? '待确认' : '已失效' }}
       </text>
     </view>
-    <view v-for="plan in item.plans" :key="plan.key" class="plan-block">
+    <view class="plan-block">
       <view class="plan-block-head"
-        ><text>{{ plan.title }}</text
-        ><text>每周 {{ Math.round(plan.weeklyMinutes / 6) / 10 }} 小时</text></view
+        ><text>{{ item.operation === 'ADJUST' ? '调整现有计划' : '创建新计划' }}</text
+        ><text>每周 {{ Math.round(item.weeklyMinutes / 6) / 10 }} 小时</text></view
       >
-      <text v-if="plan.startDate && plan.endDate" class="plan-period">
-        {{ plan.startDate }} 至 {{ plan.endDate }}
-      </text>
-      <text class="plan-note">{{ plan.description }}</text>
+      <text class="plan-period"> {{ item.startDate }} 至 {{ item.endDate }} </text>
+      <text class="plan-note">{{ item.description }}</text>
     </view>
     <text v-for="warning in item.warnings" :key="warning" class="plan-warning">{{ warning }}</text>
-    <view v-if="item.status === 'pending'" class="card-actions">
-      <button class="small-button danger" @click="$emit('reject', item)">拒绝</button>
-      <button class="small-button secondary" @click="$emit('edit', item)">继续修改</button>
-      <button class="small-button primary" @click="$emit('approve', item)">确认计划</button>
+    <view v-if="item.status === 'READY'" class="card-actions">
+      <button class="small-button secondary" @click="$emit('edit', item)">编辑</button>
+      <button
+        class="small-button primary"
+        :disabled="item.confirming"
+        @click="$emit('confirm', item)"
+      >
+        {{ item.confirming ? '确认中…' : '确认计划' }}
+      </button>
     </view>
-    <text v-else-if="item.status === 'approved'" class="plan-result"
-      >✓ 调整已确认，任务正在更新</text
-    >
-    <text v-else-if="item.status === 'editing'" class="plan-result editing"
-      >请在输入框中说明希望修改的内容</text
-    >
-    <text v-else class="plan-result editing">计划已拒绝，不会创建任务</text>
+    <text v-else-if="item.status === 'CONFIRMED'" class="plan-result">✓ 正式计划和任务已创建</text>
+    <text v-else class="plan-result editing">此预览已失效，请重新生成</text>
   </view>
 </template>
 
@@ -91,7 +80,7 @@ defineEmits<{
   flex: 1;
   flex-direction: column;
 }
-.approval-pill {
+.preview-pill {
   flex: 0 0 auto;
   padding: 8rpx 13rpx;
   color: #98611f;
@@ -99,7 +88,7 @@ defineEmits<{
   background: #fff1d9;
   border-radius: 999rpx;
 }
-.approval-pill.approved {
+.preview-pill.CONFIRMED {
   color: #168764;
   background: #e8f7f1;
 }

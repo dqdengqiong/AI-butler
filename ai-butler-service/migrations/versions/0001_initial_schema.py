@@ -3,9 +3,7 @@
 Revision ID: 0001
 Revises: None
 
-The project intentionally resets all verification data when this baseline changes.  There is no
-upgrade path from the former 0001-0009 chain; production/staging resets are rejected by the reset
-command.
+The project intentionally rebuilds local and test databases whenever this baseline changes.
 """
 
 from collections.abc import Sequence
@@ -181,15 +179,12 @@ def upgrade() -> None:
           pending_message_id uuid REFERENCES messages(id) DEFERRABLE INITIALLY DEFERRED,
           pending_response_message_id uuid REFERENCES messages(id) DEFERRABLE INITIALLY DEFERRED,
           status varchar(24) NOT NULL CHECK(status IN
-            ('QUEUED','RUNNING','AWAITING_INPUT','AWAITING_APPROVAL','SUCCEEDED',
-             'FAILED_RETRYABLE','FAILED_FINAL','CANCEL_REQUESTED','CANCELLED')),
-          pending_action varchar(24) NOT NULL DEFAULT 'START'
-            CHECK(pending_action IN ('NONE','START','INPUT_RESUME','APPROVAL_RESUME','RETRY')),
-          pending_action_key varchar(160), last_applied_action_key varchar(160),
-          graph_version varchar(32) NOT NULL DEFAULT 'butler-graph-v2',
-          prompt_bundle_version varchar(32) NOT NULL DEFAULT 'butler-prompts-v2',
-          capability_registry_version varchar(32) NOT NULL DEFAULT '1.0',
-          capability_registry_fingerprint char(64) NOT NULL,
+            ('QUEUED','RUNNING','SUCCEEDED','FAILED_RETRYABLE','FAILED_FINAL',
+             'CANCEL_REQUESTED','CANCELLED')),
+          graph_version varchar(32) NOT NULL DEFAULT 'butler-graph-v1',
+          prompt_bundle_version varchar(32) NOT NULL DEFAULT 'butler-prompts-v1',
+          tool_registry_version varchar(32) NOT NULL DEFAULT '2.0',
+          tool_registry_fingerprint char(64) NOT NULL,
           model_provider varchar(64), model_name varchar(256), last_node varchar(64),
           attempt integer NOT NULL DEFAULT 0 CHECK(attempt>=0),
           last_event_sequence integer NOT NULL DEFAULT 0 CHECK(last_event_sequence>=0),
@@ -199,13 +194,12 @@ def upgrade() -> None:
           worker_id uuid, lease_expires_at timestamptz, heartbeat_at timestamptz,
           cancel_requested_at timestamptz, started_at timestamptz, completed_at timestamptz,
           created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now(),
-          CHECK(input_tokens>=0 AND output_tokens>=0),
-          CHECK(pending_action='NONE' OR pending_action_key IS NOT NULL)
+          CHECK(input_tokens>=0 AND output_tokens>=0)
         );
         ALTER TABLE messages ADD CONSTRAINT fk_messages_run FOREIGN KEY(agent_run_id)
           REFERENCES agent_runs(id) ON DELETE SET NULL DEFERRABLE INITIALLY DEFERRED;
         CREATE UNIQUE INDEX uq_conversation_active_run ON agent_runs(conversation_id) WHERE status IN
-          ('QUEUED','RUNNING','AWAITING_INPUT','AWAITING_APPROVAL','FAILED_RETRYABLE','CANCEL_REQUESTED');
+          ('QUEUED','RUNNING','FAILED_RETRYABLE','CANCEL_REQUESTED');
         CREATE UNIQUE INDEX uq_user_executing_run ON agent_runs(user_id)
           WHERE status IN ('QUEUED','RUNNING','CANCEL_REQUESTED');
         CREATE INDEX ix_agent_runs_queue ON agent_runs(status,lease_expires_at,created_at);
@@ -218,12 +212,18 @@ def upgrade() -> None:
         );
         CREATE INDEX ix_run_events_replay ON agent_run_events(agent_run_id,sequence);
         CREATE INDEX ix_run_events_cleanup ON agent_run_events(created_at);
+        CREATE TABLE request_idempotency_keys (
+          id uuid PRIMARY KEY, user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          scope varchar(48) NOT NULL, key_hash char(64) NOT NULL, request_hash char(64) NOT NULL,
+          response_data jsonb, created_at timestamptz NOT NULL DEFAULT now(),
+          updated_at timestamptz NOT NULL DEFAULT now(), UNIQUE(user_id,scope,key_hash)
+        );
         CREATE TABLE agent_trace_spans (
           id uuid PRIMARY KEY, agent_run_id uuid NOT NULL REFERENCES agent_runs(id) ON DELETE CASCADE,
           user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE, trace_id varchar(128) NOT NULL,
           span_id varchar(32) NOT NULL, parent_span_id varchar(32), attempt smallint NOT NULL CHECK(attempt>=0),
           span_kind varchar(32) NOT NULL, node_name varchar(64), work_item_id varchar(128),
-          capability_name varchar(128), capability_version varchar(32), registry_fingerprint char(64) NOT NULL,
+          tool_name varchar(128), tool_version varchar(32), registry_fingerprint char(64) NOT NULL,
           risk_level varchar(16), gate_decision varchar(16), status varchar(24) NOT NULL,
           error_code varchar(64), retry_count smallint NOT NULL DEFAULT 0 CHECK(retry_count>=0),
           input_hash char(64), output_hash char(64), trust_level varchar(32), result_items integer,
@@ -236,14 +236,16 @@ def upgrade() -> None:
         CREATE TABLE goals (
           id uuid PRIMARY KEY, user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
           goal_type varchar(64) NOT NULL, title varchar(200) NOT NULL, target_date date,
-          status varchar(16) NOT NULL CHECK(status IN ('DRAFT','ACTIVE','COMPLETED','CANCELLED')),
+          status varchar(16) NOT NULL CHECK(status IN ('ACTIVE','COMPLETED','CANCELLED','DELETED')),
+          deleted_at timestamptz, deleted_reason varchar(32),
           created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now()
         );
         CREATE TABLE plans (
           id uuid PRIMARY KEY, user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
           goal_id uuid NOT NULL REFERENCES goals(id) ON DELETE CASCADE, title varchar(200) NOT NULL,
-          status varchar(16) NOT NULL CHECK(status IN ('DRAFT','ACTIVE','COMPLETED','CANCELLED')),
-          current_revision_id uuid, created_at timestamptz NOT NULL DEFAULT now(),
+          status varchar(16) NOT NULL CHECK(status IN ('ACTIVE','COMPLETED','CANCELLED','DELETED')),
+          current_revision_id uuid, deleted_at timestamptz, deleted_reason varchar(32),
+          created_at timestamptz NOT NULL DEFAULT now(),
           updated_at timestamptz NOT NULL DEFAULT now()
         );
         CREATE TABLE plan_revisions (
@@ -251,8 +253,7 @@ def upgrade() -> None:
           user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
           agent_run_id uuid REFERENCES agent_runs(id) ON DELETE SET NULL,
           revision integer NOT NULL CHECK(revision>0),
-          status varchar(24) NOT NULL CHECK(status IN
-            ('DRAFT','PENDING_APPROVAL','APPROVED','REJECTED','SUPERSEDED')),
+          status varchar(24) NOT NULL CHECK(status IN ('APPROVED','SUPERSEDED')),
           objective_summary text NOT NULL, start_date date NOT NULL, end_date date NOT NULL,
           weekly_minutes integer NOT NULL CHECK(weekly_minutes>0), change_reason text,
           content jsonb NOT NULL DEFAULT '{}', approved_at timestamptz,
@@ -262,8 +263,9 @@ def upgrade() -> None:
           FOREIGN KEY(current_revision_id) REFERENCES plan_revisions(id);
         CREATE TABLE plan_stages (
           id uuid PRIMARY KEY, plan_revision_id uuid NOT NULL REFERENCES plan_revisions(id) ON DELETE CASCADE,
-          sequence integer NOT NULL CHECK(sequence>0), title varchar(200) NOT NULL, objective text NOT NULL,
-          start_date date NOT NULL, end_date date NOT NULL, UNIQUE(plan_revision_id,sequence)
+          stage_key varchar(128) NOT NULL, sequence integer NOT NULL CHECK(sequence>0),
+          title varchar(200) NOT NULL, objective text NOT NULL, start_date date NOT NULL, end_date date NOT NULL,
+          UNIQUE(plan_revision_id,sequence), UNIQUE(plan_revision_id,stage_key)
         );
         CREATE TABLE plan_task_templates (
           id uuid PRIMARY KEY, plan_revision_id uuid NOT NULL REFERENCES plan_revisions(id) ON DELETE CASCADE,
@@ -271,24 +273,6 @@ def upgrade() -> None:
           template_key varchar(128) NOT NULL, title varchar(200) NOT NULL,
           expected_minutes integer NOT NULL CHECK(expected_minutes>0), schedule_rule jsonb NOT NULL DEFAULT '{}',
           UNIQUE(plan_revision_id,template_key)
-        );
-        CREATE TABLE approval_decisions (
-          id uuid PRIMARY KEY, user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-          agent_run_id uuid NOT NULL REFERENCES agent_runs(id) ON DELETE CASCADE,
-          approval_version integer NOT NULL DEFAULT 1 CHECK(approval_version>0),
-          status varchar(16) NOT NULL DEFAULT 'PENDING'
-            CHECK(status IN ('PENDING','APPROVED','EDITED','REJECTED','CANCELLED')),
-          action varchar(16), feedback text, decided_at timestamptz,
-          created_at timestamptz NOT NULL DEFAULT now()
-        );
-        CREATE UNIQUE INDEX uq_run_pending_approval ON approval_decisions(agent_run_id)
-          WHERE status='PENDING';
-        CREATE TABLE approval_decision_items (
-          id uuid PRIMARY KEY, approval_id uuid NOT NULL REFERENCES approval_decisions(id) ON DELETE CASCADE,
-          plan_id uuid NOT NULL REFERENCES plans(id) ON DELETE CASCADE,
-          plan_revision_id uuid NOT NULL REFERENCES plan_revisions(id) ON DELETE CASCADE,
-          expected_current_revision_id uuid, work_item_id varchar(128) NOT NULL,
-          UNIQUE(approval_id,plan_revision_id), UNIQUE(approval_id,work_item_id)
         );
         CREATE TABLE tasks (
           id uuid PRIMARY KEY, user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -303,6 +287,22 @@ def upgrade() -> None:
           UNIQUE(plan_revision_id,task_key)
         );
         CREATE INDEX ix_tasks_user_date ON tasks(user_id,scheduled_date,status);
+        CREATE TABLE plan_schedule_watermarks (
+          id uuid PRIMARY KEY, user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          plan_id uuid NOT NULL UNIQUE REFERENCES plans(id) ON DELETE CASCADE,
+          plan_revision_id uuid NOT NULL REFERENCES plan_revisions(id) ON DELETE CASCADE,
+          materialized_through date NOT NULL,
+          created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now()
+        );
+        CREATE INDEX ix_plan_schedule_watermarks_due
+          ON plan_schedule_watermarks(materialized_through,plan_id);
+        CREATE TABLE plan_schedule_events (
+          id uuid PRIMARY KEY, user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          plan_id uuid NOT NULL REFERENCES plans(id) ON DELETE CASCADE,
+          plan_revision_id uuid NOT NULL REFERENCES plan_revisions(id) ON DELETE CASCADE,
+          event_date date NOT NULL, event_type varchar(32) NOT NULL,
+          details jsonb NOT NULL DEFAULT '{}', created_at timestamptz NOT NULL DEFAULT now()
+        );
         CREATE TABLE task_executions (
           id uuid PRIMARY KEY, user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
           task_id uuid NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,

@@ -8,7 +8,7 @@ type RefreshRequest = components['schemas']['RefreshRequest']
 type LogoutRequest = components['schemas']['LogoutRequest']
 type SendMessageRequest = components['schemas']['SendMessageRequest']
 type RetryRunRequest = components['schemas']['RetryRunRequest']
-type ApprovalRequest = components['schemas']['ApprovalDecisionRequest']
+type PlanPreviewConfirmationRequest = components['schemas']['PlanPreviewConfirmationRequestV1']
 type TaskExecutionRequest = components['schemas']['TaskExecutionRequest']
 type PreferencesRequest = components['schemas']['PreferencesRequest']
 type UploadIntentRequest = components['schemas']['UploadIntentRequest']
@@ -21,6 +21,7 @@ export type ConversationListResponse = components['schemas']['ConversationListRe
 export type MessageListResponse = components['schemas']['MessageListResponse']
 export type MessageResponse = components['schemas']['MessageResponse']
 export type SendMessageResponse = components['schemas']['SendMessageResponse']
+export type PlanConfirmationResponse = components['schemas']['PlanConfirmationResponseV1']
 export type AuthConfigResponse = components['schemas']['AuthConfigResponse']
 export type PhoneVerificationCodeResponse = components['schemas']['PhoneVerificationCodeResponse']
 
@@ -159,12 +160,25 @@ export const butlerApi = {
       accessToken,
     })
   },
-  approve(approvalId: string, payload: ApprovalRequest, accessToken: string): Promise<ApiObject> {
+  deletePlan(planId: string, accessToken: string): Promise<void> {
     return request({
-      path: `/v1/approvals/${encodeURIComponent(approvalId)}/decisions`,
+      path: `/v1/plans/${encodeURIComponent(planId)}`,
+      method: 'DELETE',
+      accessToken,
+      headers: { 'Idempotency-Key': idempotencyKey('delete-plan') },
+    })
+  },
+  confirmPlanPreview(
+    messageId: string,
+    payload: PlanPreviewConfirmationRequest,
+    accessToken: string,
+  ): Promise<PlanConfirmationResponse> {
+    return request({
+      path: `/v1/plan-previews/${encodeURIComponent(messageId)}/confirm`,
       method: 'POST',
       data: payload,
       accessToken,
+      headers: { 'Idempotency-Key': idempotencyKey('confirm-plan-preview') },
     })
   },
   preferences(accessToken: string): Promise<ApiObject> {

@@ -38,6 +38,7 @@ export type AgentShortcutCode = string
 export interface AgentStarterPrompt {
   label: string
   content: string
+  behavior: 'SEND_MESSAGE' | 'FILL_COMPOSER'
 }
 
 /**
@@ -70,7 +71,7 @@ export interface ConversationViewModel {
   agentCode?: AgentShortcutCode
   runId?: string
   runStatus?: string
-  statusLabel: '待回复' | '待确认' | '待重试' | '处理中' | '已完成'
+  statusLabel: '待重试' | '处理中' | '已完成'
 }
 
 export interface SourceSummaryViewModel {
@@ -93,38 +94,22 @@ export type ChatItem =
     }
   | {
       key: string
-      kind: 'selection'
-      title: string
-      description: string
-      options: string[]
-      selected: number
-      submitted: boolean
-      cardId?: string
-      optionIds?: string[]
-      allowFreeText: boolean
-      inputPlaceholder?: string
-      submitLabel: string
-    }
-  | {
-      key: string
-      kind: 'plan'
-      schemaVersion: '1.0' | '1.1'
-      mode: string
+      messageId?: string
+      kind: 'planPreview'
       title: string
       description: string
       weeklyMinutes: number
-      plans: {
-        key: string
-        title: string
-        description: string
-        weeklyMinutes: number
-        startDate?: string
-        endDate?: string
-      }[]
+      availableWeeklyMinutes: number
+      periodWeeks: 4 | 8 | 12
+      startDate: string
+      endDate: string
+      expiresAt: string
+      operation: 'CREATE' | 'ADJUST'
+      targetPlanId?: string
+      previewHash: string
       warnings: string[]
-      status: 'pending' | 'approved' | 'editing' | 'rejected'
-      approvalId: string
-      approvalVersion: number
+      status: 'READY' | 'CONFIRMED' | 'SUPERSEDED' | 'DISMISSED' | 'EXPIRED'
+      confirming?: boolean
     }
   | {
       key: string

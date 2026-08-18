@@ -21,7 +21,7 @@ const statusSource = readFileSync(
   'utf8',
 )
 const planSource = readFileSync(
-  fileURLToPath(new URL('../src/components/chat/ChatPlanCard.vue', import.meta.url)),
+  fileURLToPath(new URL('../src/components/chat/ChatPlanPreviewCard.vue', import.meta.url)),
   'utf8',
 )
 const chatTemplate = parse(chatSource).descriptor.template?.content ?? ''
@@ -42,7 +42,9 @@ describe('chat entry layout', () => {
   it('keeps quick prompts above the composer outside the fresh-only branch', () => {
     expect(chatTemplate).toContain('<ChatComposer')
     expect(composerTemplate).toContain('class="quick-prompts"')
-    expect(composerTemplate).toContain('@click="draft = prompt.prompt"')
+    expect(composerTemplate).toContain('@click="choosePrompt(prompt)"')
+    expect(composerSource).toContain("prompt.behavior === 'FILL_COMPOSER'")
+    expect(composerSource).toContain("emit('send', prompt.prompt)")
     expect(composerTemplate.indexOf('class="quick-prompts"')).toBeLessThan(
       composerTemplate.indexOf('class="composer-shell"'),
     )
@@ -56,8 +58,8 @@ describe('chat entry layout', () => {
   })
 
   it('shows the confirmed period and weekly investment on plan cards', () => {
-    expect(planTemplate).toContain('plan.startDate && plan.endDate')
-    expect(planTemplate).toContain('{{ plan.startDate }} 至 {{ plan.endDate }}')
-    expect(planTemplate).toContain('plan.weeklyMinutes')
+    expect(planTemplate).toContain('{{ item.startDate }} 至 {{ item.endDate }}')
+    expect(planTemplate).toContain('item.weeklyMinutes')
+    expect(planTemplate).toContain("item.status === 'READY'")
   })
 })

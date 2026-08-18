@@ -1,12 +1,11 @@
 import type { Ref } from 'vue'
-import { ref } from 'vue'
 import { storeToRefs } from 'pinia'
 
 import { ApiError } from '@/api/client'
 import { useButlerStore } from '@/stores/butler'
 import type { ChatItem, UploadedAttachment } from '@/types/view-models'
 
-type PlanChatItem = Extract<ChatItem, { kind: 'plan' }>
+type PreviewItem = Extract<ChatItem, { kind: 'planPreview' }>
 type StatusChatItem = Extract<ChatItem, { kind: 'status' }>
 
 function confirmSwitch(title: string, content: string, confirmText: string): Promise<boolean> {
@@ -22,69 +21,16 @@ function confirmSwitch(title: string, content: string, confirmText: string): Pro
   })
 }
 
-/** 封装聊天卡片交互、审批和发送失败恢复，页面只负责连接视图事件。 */
+/** 聊天交互只提交自然语言；计划预览也由普通消息触发。 */
 export function usePageChat(token: () => string, attachments: Ref<UploadedAttachment[]>) {
   const butler = useButlerStore()
-  const { chatItems, stagedScene } = storeToRefs(butler)
-  const editingPlan = ref<PlanChatItem | null>(null)
-  const submittingApprovalIds = new Set<string>()
-
-  function selectOption(itemKey: string, optionIndex: number): void {
-    const item = chatItems.value.find((entry) => entry.key === itemKey)
-    if (item?.kind === 'selection' && !item.submitted) item.selected = optionIndex
-  }
-
-  async function submitSelection(itemKey: string): Promise<void> {
-    const item = chatItems.value.find((entry) => entry.key === itemKey)
-    if (item?.kind !== 'selection' || item.submitted) return
-    const optionId = item.optionIds?.[item.selected]
-    if (!item.cardId || !optionId) return
-    item.submitted = true
+  const { stagedScene } = storeToRefs(butler)
+  async function confirmPlan(item: PreviewItem): Promise<void> {
     try {
-      await butler.sendMessage('', token(), { cardId: item.cardId, optionId })
+      await butler.confirmPlanPreview(item, token())
+      uni.showToast({ title: '正式计划已创建', icon: 'success' })
     } catch (error) {
-      // 服务端未接受前恢复卡片可操作状态，避免一次网络错误永久锁住当前中断。
-      item.submitted = false
-      uni.showToast({ title: error instanceof Error ? error.message : '提交失败', icon: 'none' })
-    }
-  }
-
-  async function approvePlan(item: PlanChatItem): Promise<void> {
-    if (item.status !== 'pending' || submittingApprovalIds.has(item.approvalId)) return
-    submittingApprovalIds.add(item.approvalId)
-    try {
-      await butler.approvePlan(item, 'APPROVE', token())
-    } catch (error) {
-      if (
-        error instanceof ApiError &&
-        error.code === 'OTHER_CONVERSATION_RUNNING' &&
-        (await confirmSwitch('另一项任务正在处理', '停止当前处理并确认这份计划吗？', '停止并确认'))
-      ) {
-        await butler.approvePlan(item, 'APPROVE', token(), undefined, 'CANCEL_OTHER')
-        return
-      }
-      uni.showToast({ title: error instanceof Error ? error.message : '审批失败', icon: 'none' })
-    } finally {
-      submittingApprovalIds.delete(item.approvalId)
-    }
-  }
-
-  function editPlan(item: PlanChatItem): void {
-    if (item.status !== 'pending') return
-    item.status = 'editing'
-    editingPlan.value = item
-    uni.showToast({ title: '请在输入框继续说明', icon: 'none' })
-  }
-
-  async function rejectPlan(item: PlanChatItem): Promise<void> {
-    if (item.status !== 'pending' || submittingApprovalIds.has(item.approvalId)) return
-    submittingApprovalIds.add(item.approvalId)
-    try {
-      await butler.approvePlan(item, 'REJECT', token())
-    } catch (error) {
-      uni.showToast({ title: error instanceof Error ? error.message : '拒绝失败', icon: 'none' })
-    } finally {
-      submittingApprovalIds.delete(item.approvalId)
+      uni.showToast({ title: error instanceof Error ? error.message : '确认失败', icon: 'none' })
     }
   }
 
@@ -94,8 +40,6 @@ export function usePageChat(token: () => string, attachments: Ref<UploadedAttach
     try {
       await butler.retryRun(item.runId, item.attempt, token())
     } catch (error) {
-      // retry 接口使用 expected_attempt 做并发保护；失败时保留原错误卡，允许用户
-      // 在刷新服务端事实后再次操作，而不是乐观地假装 run 已恢复。
       item.retrying = false
       uni.showToast({ title: error instanceof Error ? error.message : '重试失败', icon: 'none' })
     }
@@ -105,21 +49,15 @@ export function usePageChat(token: () => string, attachments: Ref<UploadedAttach
     const normalized = content.trim()
     const clientMessageId = `message-${Date.now()}-${Math.random().toString(36).slice(2)}`
     try {
-      if (editingPlan.value) {
-        await butler.approvePlan(editingPlan.value, 'EDIT', token(), normalized)
-        editingPlan.value = null
-      } else {
-        const wasStagedWelcome = stagedScene.value !== null
-        const response = await butler.sendMessage(
-          normalized || '请处理我添加的资料',
-          token(),
-          undefined,
-          attachments.value.map((item) => item.id),
-          { clientMessageId },
-        )
-        if (response.transition.kind === 'CREATED' && !wasStagedWelcome) {
-          uni.showToast({ title: '已为你整理为新话题', icon: 'none' })
-        }
+      const wasStagedWelcome = stagedScene.value !== null
+      const response = await butler.sendMessage(
+        normalized || '请处理我添加的资料',
+        token(),
+        attachments.value.map((item) => item.id),
+        { clientMessageId },
+      )
+      if (response.transition.kind === 'CREATED' && !wasStagedWelcome) {
+        uni.showToast({ title: '已为你整理为新话题', icon: 'none' })
       }
       attachments.value = []
     } catch (error) {
@@ -130,17 +68,13 @@ export function usePageChat(token: () => string, attachments: Ref<UploadedAttach
           '开始新话题',
         )
         if (!confirmed) return
-        const response = await butler.sendMessage(
+        await butler.sendMessage(
           normalized || '请处理我添加的资料',
           token(),
-          undefined,
           attachments.value.map((item) => item.id),
           { clientMessageId, contextPolicy: 'ARCHIVE_AND_START', executionPolicy: 'CANCEL_OTHER' },
         )
         attachments.value = []
-        if (response.transition.kind === 'CREATED') {
-          uni.showToast({ title: '已为你整理为新话题', icon: 'none' })
-        }
         return
       }
       if (error instanceof ApiError && error.code === 'OTHER_CONVERSATION_RUNNING') {
@@ -153,7 +87,6 @@ export function usePageChat(token: () => string, attachments: Ref<UploadedAttach
         await butler.sendMessage(
           normalized || '请处理我添加的资料',
           token(),
-          undefined,
           attachments.value.map((item) => item.id),
           { clientMessageId, executionPolicy: 'CANCEL_OTHER' },
         )
@@ -165,13 +98,8 @@ export function usePageChat(token: () => string, attachments: Ref<UploadedAttach
   }
 
   return {
-    approvePlan,
-    editPlan,
-    editingPlan,
-    rejectPlan,
+    confirmPlan,
     retryRun,
-    selectOption,
     sendMessage,
-    submitSelection,
   }
 }

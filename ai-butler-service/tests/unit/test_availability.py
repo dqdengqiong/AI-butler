@@ -218,3 +218,14 @@ def test_summary_lists_custom_excluded_days() -> None:
         )
     )
     assert result.summary == "周二 30 分钟，周一休息，每周共 30 分钟"
+
+
+def test_summary_lists_explicit_excluded_dates() -> None:
+    result = AvailabilityInterpreter.normalize(
+        AvailabilityInterpretationV1(
+            status="COMPLETE",
+            windows=(AvailabilityWindowV1(day_of_week=2, available_minutes=30),),
+            excluded_dates=(date(2026, 8, 25),),
+        )
+    )
+    assert result.summary == "周二 30 分钟，08月25日不安排学习，每周共 30 分钟"

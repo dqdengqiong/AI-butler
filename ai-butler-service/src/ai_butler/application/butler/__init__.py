@@ -1,4 +1,4 @@
-"""兼容导出 AI 管家应用服务及其稳定常量。"""
+"""导出 AI 管家应用服务及其稳定常量。"""
 
 from .service import ButlerService
 from .shared import (

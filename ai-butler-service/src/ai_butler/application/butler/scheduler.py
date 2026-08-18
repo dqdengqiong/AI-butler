@@ -17,12 +17,11 @@ from ai_butler.agent.evidence import estimate_tokens
 from .context import ButlerContext
 from .memory import LongTermMemoryService
 from .retention import RetentionService
-from .shared import (
-    _row,
-)
+from .rolling_schedule import RollingScheduleMixin
+from .shared import _row
 
 
-class SchedulerService:
+class SchedulerService(RollingScheduleMixin):
     def __init__(self, context: ButlerContext) -> None:
         self.database = context.database
         self.settings = context.settings
@@ -35,6 +34,8 @@ class SchedulerService:
     async def scheduler_poll_once(self) -> bool:
         """处理一个可安全重试的知识、记忆、通知或治理作业。"""
 
+        if await self._materialize_one_plan_window():
+            return True
         if await self._delete_one_knowledge_vector():
             return True
         if await self._ingest_one_private_file():

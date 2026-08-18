@@ -18,11 +18,11 @@ from ai_butler.adapters.search import (
 from ai_butler.adapters.sms import SmsProvider
 from ai_butler.adapters.vector import VectorStore
 from ai_butler.api.schemas import (
-    ApprovalDecisionRequest,
     AvailabilityRequest,
     CompleteUploadRequest,
     PhoneLoginRequest,
     PhoneVerificationCodeRequest,
+    PlanPreviewConfirmationRequestV1,
     PreferencesRequest,
     ProfileRequest,
     SendMessageRequest,
@@ -44,9 +44,8 @@ from .events import EventService
 from .evidence_execution import EvidenceExecutionService
 from .executor import RunExecutor
 from .files import FileService
-from .interrupts import InterruptionService
 from .messages import MessageService
-from .plan_execution import PlanExecutionService
+from .plan_previews import PlanPreviewService
 from .planning import PlanningService
 from .routing import RoutingService
 from .runs import RunService
@@ -65,7 +64,7 @@ from .worker import WorkerService
 
 
 class ButlerService:
-    """组合认证、会话、计划、知识和 Worker 能力的兼容应用门面。"""
+    """组合认证、会话、计划、知识和 Worker 能力的应用门面。"""
 
     def __init__(
         self,
@@ -114,19 +113,17 @@ class ButlerService:
         self._evidence = EvidenceExecutionService(
             self._context, self._events, self._completion, self._bootstrap
         )
-        self._plan_execution = PlanExecutionService(self._events, self._evidence, self._bootstrap)
-        self._runs = RunService(self._context, self._events, self._plan_execution, self._repository)
+        self._runs = RunService(self._context, self._events, self._repository)
         self._messages = MessageService(
             self._context, self._routing, self._repository, self._events, self._responses
         )
-        self._interrupts = InterruptionService(self._context, self._events)
         self._executor = RunExecutor(
             self._context,
-            self._interrupts,
-            self._plan_execution,
+            self._events,
             self._evidence,
             self._completion,
         )
+        self._plan_previews = PlanPreviewService(self._context)
         self._worker = WorkerService(self._context, self._events, self._executor, self._completion)
         self._scheduler = SchedulerService(self._context)
         self._files = FileService(self._context)
@@ -215,6 +212,15 @@ class ButlerService:
     async def send_message(self, user_id: UUID, request: SendMessageRequest) -> dict[str, object]:
         return await self._messages.send_message(user_id, request)
 
+    async def confirm_plan_preview(
+        self,
+        user_id: UUID,
+        message_id: UUID,
+        request: PlanPreviewConfirmationRequestV1,
+        idempotency_key: str,
+    ) -> dict[str, object]:
+        return await self._plan_previews.confirm(user_id, message_id, request, idempotency_key)
+
     async def get_run(self, user_id: UUID, run_id: UUID) -> dict[str, object]:
         return await self._runs.get_run(user_id, run_id)
 
@@ -235,11 +241,6 @@ class ButlerService:
     ) -> dict[str, object]:
         return await self._runs.retry_run(user_id, run_id, expected_attempt, execution_policy)
 
-    async def decide_approval(
-        self, user_id: UUID, approval_id: UUID, request: ApprovalDecisionRequest
-    ) -> dict[str, object]:
-        return await self._runs.decide_approval(user_id, approval_id, request)
-
     async def dashboard(self, user_id: UUID, requested_date: date) -> dict[str, object]:
         return await self._planning.dashboard(user_id, requested_date)
 
@@ -259,6 +260,9 @@ class ButlerService:
 
     async def get_plan(self, user_id: UUID, plan_id: UUID) -> dict[str, object]:
         return await self._planning.get_plan(user_id, plan_id)
+
+    async def delete_plan(self, user_id: UUID, plan_id: UUID, idempotency_key: str) -> None:
+        return await self._planning.delete_plan(user_id, plan_id, idempotency_key)
 
     async def list_tasks(
         self, user_id: UUID, date_from: date | None, date_to: date | None

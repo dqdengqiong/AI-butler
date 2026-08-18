@@ -33,6 +33,7 @@ async def test_long_term_memory_and_private_vectors_are_deleted_across_stores(
         langgraph_migration_database_url=(
             "postgresql://butler_migrator:butler_migrator@127.0.0.1:5432/butler_langgraph_test"
         ),
+        qdrant_collection="ai_butler_knowledge_test",
         object_storage_local_path=tmp_path,
         public_base_url="http://test",
     )

@@ -50,14 +50,17 @@ class BootstrapService:
                         {
                             "label": "制定备考计划",
                             "content": "根据我的目标考试和可投入时间，帮我制定备考计划",
+                            "behavior": "SEND_MESSAGE",
                         },
                         {
                             "label": "安排今日任务",
                             "content": "结合我的备考进度，帮我安排今天的学习任务",
+                            "behavior": "FILL_COMPOSER",
                         },
                         {
                             "label": "复盘错题",
                             "content": "帮我整理并复盘最近的错题，找出薄弱环节",
+                            "behavior": "FILL_COMPOSER",
                         },
                     ],
                 },

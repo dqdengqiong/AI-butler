@@ -119,7 +119,7 @@ pnpm dev:h5
 
 ## 模型路由配置
 
-本地开发和普通测试默认 `MODEL_ROUTING_ENABLED=false`，只使用确定性 Fake。真实调用由 `model-routing.toml` 固定路由；当前配置全部使用千问，且不设置备用模型。需要多模型容灾时，可为具体路由显式增加跨供应商 fallback；只在超时、连接失败、429 或 5xx 时切换。网关只初始化路由实际引用的模型，未引用的 provider 或模型不要求配置密钥。运行时不按价格、延迟或模型自评选模。新 run 固定为 `butler-graph-v3`/`butler-prompts-v3`，旧 v2 run 仍按创建时版本恢复。
+本地开发和普通测试默认 `MODEL_ROUTING_ENABLED=false`，只使用确定性 Fake。真实调用由 `model-routing.toml` 固定路由；当前配置全部使用千问，且不设置备用模型。需要多模型容灾时，可为具体路由显式增加跨供应商 fallback；只在超时、连接失败、429 或 5xx 时切换。网关只初始化路由实际引用的模型，未引用的 provider 或模型不要求配置密钥。运行时不按价格、延迟或模型自评选模。所有新 run 使用唯一当前图 `butler-graph-v1` 和 Prompt bundle `butler-prompts-v1`，每条消息单轮执行到终态。
 
 启用真实模型时，在未提交到版本库的 `.env.local` 中设置：
 

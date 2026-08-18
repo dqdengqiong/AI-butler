@@ -1,7 +1,7 @@
 import { computed, ref } from 'vue'
 import { defineStore } from 'pinia'
 
-import { butlerApi, type ApiObject, type SendMessageResponse } from '@/api/butler'
+import { butlerApi, type SendMessageResponse } from '@/api/butler'
 import { ApiError } from '@/api/client'
 import { connectRunStream, type RunStreamEvent } from '@/stream/transport'
 import { createRunRetry } from '@/stores/butler-run-retry'
@@ -41,7 +41,6 @@ export type AssistantSceneTransition = 'CURRENT' | 'RESUMABLE' | 'WELCOME' | 'CO
 type StagedAssistantScene = AssistantSceneTarget | null
 
 const executingRunStatuses = ['QUEUED', 'RUNNING', 'CANCEL_REQUESTED']
-const suspendedRunStatuses = ['AWAITING_INPUT', 'AWAITING_APPROVAL', 'FAILED_RETRYABLE']
 
 function conversationMatchesScene(
   conversation: ConversationViewModel,
@@ -60,10 +59,6 @@ function stagedSceneMatches(staged: StagedAssistantScene, target: AssistantScene
   return staged.specialistCode === target.specialistCode
 }
 
-/**
- * 服务端事实 Store。SSE 文本只用于临时展示；收到 message.completed 后总是重新
- * 拉取消息，以服务端完整内容覆盖增量，避免重连或 attempt reset 造成拼接错误。
- */
 export const useButlerStore = defineStore('butler', () => {
   const plans = ref<PlanViewModel[]>([])
   const tasks = ref<TaskViewModel[]>([])
@@ -160,15 +155,6 @@ export const useButlerStore = defineStore('butler', () => {
       await refreshConversations(accessToken)
     }
 
-    const resumable = conversations.value.find(
-      (item) =>
-        conversationMatchesScene(item, target) &&
-        suspendedRunStatuses.includes(item.runStatus ?? ''),
-    )
-    if (resumable) {
-      await loadConversation(resumable.key, accessToken)
-      return 'RESUMABLE'
-    }
     stagedScene.value = target
     activeConversationId.value = null
     chatItems.value = []
@@ -190,8 +176,6 @@ export const useButlerStore = defineStore('butler', () => {
     await refreshConversations(accessToken)
     if (!deletingActiveView) return
 
-    // 删除正在查看的历史会话后回到服务端唯一 CURRENT 会话。删除接口禁止
-    // CURRENT，因此正常情况下始终能找到回退目标；空值分支用于防御损坏响应。
     const current = conversations.value.find((item) => !item.archived)
     activeConversationId.value = current?.key ?? null
     chatItems.value = []
@@ -201,7 +185,6 @@ export const useButlerStore = defineStore('butler', () => {
   async function sendMessage(
     content: string,
     accessToken: string,
-    selection?: { cardId: string; optionId: string },
     attachmentFileIds: string[] = [],
     options: SendMessageOptions = {},
   ): Promise<SendMessageResponse> {
@@ -227,13 +210,6 @@ export const useButlerStore = defineStore('butler', () => {
         execution_policy: options.executionPolicy ?? 'REJECT',
         content,
         attachments: attachmentFileIds.map((fileId, position) => ({ file_id: fileId, position })),
-        selection: selection
-          ? {
-              card_id: selection.cardId,
-              action_id: 'submit-selection',
-              selected_option_ids: [selection.optionId],
-            }
-          : null,
       },
       accessToken,
     )
@@ -397,9 +373,7 @@ export const useButlerStore = defineStore('butler', () => {
       streamConnection.value = null
       return
     }
-    if (
-      ['message.completed', 'interrupt', 'run.completed', 'run.cancelled'].includes(event.event)
-    ) {
+    if (['message.completed', 'run.completed', 'run.cancelled'].includes(event.event)) {
       await refreshMessages(accessToken, conversationId)
       streamMessageIds.delete(event.runId)
       if (event.event.startsWith('run.')) {
@@ -415,48 +389,27 @@ export const useButlerStore = defineStore('butler', () => {
     }
   }
 
-  async function approvePlan(
-    item: Extract<ChatItem, { kind: 'plan' }>,
-    action: 'APPROVE' | 'EDIT' | 'REJECT',
+  async function confirmPlanPreview(
+    item: Extract<ChatItem, { kind: 'planPreview' }>,
     accessToken: string,
-    feedback?: string,
-    executionPolicy: 'REJECT' | 'CANCEL_OTHER' = 'REJECT',
   ): Promise<void> {
-    let response: ApiObject
+    if (item.status !== 'READY' || item.confirming || !item.messageId) return
+    item.confirming = true
     try {
-      response = await butlerApi.approve(
-        item.approvalId,
-        {
-          schema_version: '1.0',
-          approval_id: item.approvalId,
-          expected_approval_version: item.approvalVersion,
-          action,
-          feedback: feedback ?? null,
-          execution_policy: executionPolicy,
-        },
+      await butlerApi.confirmPlanPreview(
+        item.messageId,
+        { schema_version: '1.0', expected_preview_hash: item.previewHash },
         accessToken,
       )
-    } catch (reason) {
-      if (reason instanceof ApiError && reason.code === 'APPROVAL_VERSION_CONFLICT') {
-        // 老版本消息可能仍携带旧 approval_version；重新读取服务端投影后再让用户确认。
-        await refreshMessages(accessToken)
-      }
-      throw reason
-    }
-    item.status = action === 'APPROVE' ? 'approved' : action === 'EDIT' ? 'editing' : 'rejected'
-    const runId = stringValue(response, 'run_id')
-    if (runId) {
-      const conversationId = activeConversationId.value
-      if (!conversationId) throw new Error('当前没有可继续的对话')
-      const ticket = await butlerApi.streamTicket(runId, accessToken)
-      startStream(
-        runId,
-        conversationId,
-        stringValue(ticket, 'events_url'),
-        stringValue(ticket, 'ticket'),
-        numberValue(ticket, 'last_sequence'),
-        accessToken,
-      )
+      item.status = 'CONFIRMED'
+      const [dashboard] = await Promise.all([
+        butlerApi.dashboard(accessToken),
+        refreshMessages(accessToken),
+      ])
+      plans.value = asArray(dashboard.plans).map(mapPlan)
+      tasks.value = asArray(dashboard.today_tasks).map(mapTask)
+    } finally {
+      item.confirming = false
     }
   }
 
@@ -486,6 +439,13 @@ export const useButlerStore = defineStore('butler', () => {
       }
       throw reason
     }
+  }
+
+  async function deletePlan(planId: string, accessToken: string): Promise<void> {
+    await butlerApi.deletePlan(planId, accessToken)
+    const dashboard = await butlerApi.dashboard(accessToken)
+    plans.value = asArray(dashboard.plans).map(mapPlan)
+    tasks.value = asArray(dashboard.today_tasks).map(mapTask)
   }
 
   function reset(): void {
@@ -522,8 +482,9 @@ export const useButlerStore = defineStore('butler', () => {
     loadConversation,
     sendMessage,
     retryRun,
-    approvePlan,
+    confirmPlanPreview,
     completeTask,
+    deletePlan,
     refreshMessages,
     refreshConversations,
     reset,

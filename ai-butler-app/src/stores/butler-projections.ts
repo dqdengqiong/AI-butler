@@ -70,7 +70,7 @@ export function mapPlan(value: ApiObject): PlanViewModel {
     icon: '公',
     title: stringValue(value, 'title', '公务员备考'),
     subtitle: '当前已批准版本',
-    statusLabel: stringValue(value, 'status', 'ACTIVE') === 'ACTIVE' ? '进行中' : '草案',
+    statusLabel: stringValue(value, 'status', 'ACTIVE') === 'ACTIVE' ? '进行中' : '已结束',
     progress: numberValue(progress, 'percent'),
     progressLabel: `${completed} / ${total} 项`,
     tone: 'blue',
@@ -94,80 +94,41 @@ export function mapTask(value: ApiObject): TaskViewModel {
 function mapCard(value: ApiObject): ChatItem | null {
   const type = stringValue(value, 'card_type')
   const payload = asObject(value.payload) ?? {}
-  const refs = asObject(value.entity_refs) ?? {}
-  if (type === 'PlanCard') {
-    const schemaVersion = stringValue(value, 'schema_version')
-    if (schemaVersion !== '1.0' && schemaVersion !== '1.1') {
-      return {
-        key: stringValue(value, 'card_id'),
-        kind: 'status',
-        title: '当前计划卡版本暂不支持',
-        description: '请刷新客户端或在计划页查看服务端已保存的计划。',
-      }
-    }
-    const approvalStatus = stringValue(refs, 'approval_status', 'PENDING')
-    const mode = stringValue(payload, 'mode', 'SINGLE_PLAN_ADJUST')
-    const plans =
-      schemaVersion === '1.1'
-        ? asArray(payload.plans).map((plan, index) => ({
-            key: stringValue(plan, 'work_item_id', `plan-${index}`),
-            title: stringValue(plan, 'title', `计划 ${index + 1}`),
-            description: stringValue(plan, 'objective_summary'),
-            weeklyMinutes: numberValue(plan, 'weekly_minutes'),
-            startDate: stringValue(plan, 'start_date') || undefined,
-            endDate: stringValue(plan, 'end_date') || undefined,
-          }))
-        : [
-            {
-              key: stringValue(value, 'card_id'),
-              title: stringValue(payload, 'title', '公务员备考计划'),
-              description: stringValue(payload, 'objective_summary'),
-              weeklyMinutes: numberValue(payload, 'weekly_minutes'),
-              startDate: stringValue(payload, 'start_date') || undefined,
-              endDate: stringValue(payload, 'end_date') || undefined,
-            },
-          ]
-    // 1.1 的 cardinality 是副作用审批契约的一部分；异常卡片必须只读降级。
-    if (
-      schemaVersion === '1.1' &&
-      ((mode === 'BUNDLE_CREATE' && plans.length < 2) ||
-        (mode === 'SINGLE_PLAN_ADJUST' && plans.length !== 1))
-    ) {
-      return {
-        key: stringValue(value, 'card_id'),
-        kind: 'status',
-        title: '计划草案结构无效',
-        description: '此卡片不会执行批准操作，请重新生成计划。',
-      }
-    }
+  if (type === 'PlanPreviewCard') {
+    const plan = asObject(payload.plan) ?? {}
+    const startDate = stringValue(plan, 'start_date')
+    const endDate = stringValue(plan, 'end_date')
+    const expiresAt = stringValue(payload, 'expires_at')
+    const dayMilliseconds = 86_400_000
+    const weeks = Math.ceil(
+      (new Date(endDate).getTime() - new Date(startDate).getTime() + dayMilliseconds) /
+        dayMilliseconds /
+        7,
+    )
     return {
       key: stringValue(value, 'card_id'),
-      kind: 'plan',
-      schemaVersion,
-      mode,
+      kind: 'planPreview',
       title: stringValue(payload, 'title', '公务员备考计划'),
-      description:
-        schemaVersion === '1.0'
-          ? stringValue(payload, 'objective_summary')
-          : `${plans.length} 个独立计划，共 ${numberValue(payload, 'total_weekly_minutes')} 分钟/周`,
-      weeklyMinutes:
-        schemaVersion === '1.0'
-          ? numberValue(payload, 'weekly_minutes')
-          : numberValue(payload, 'total_weekly_minutes'),
-      plans,
+      description: stringValue(plan, 'objective_summary'),
+      weeklyMinutes: numberValue(payload, 'total_weekly_minutes'),
+      availableWeeklyMinutes: numberValue(payload, 'available_weekly_minutes'),
+      periodWeeks: weeks === 8 || weeks === 12 ? weeks : 4,
+      startDate,
+      endDate,
+      expiresAt,
+      operation: stringValue(payload, 'operation') === 'ADJUST' ? 'ADJUST' : 'CREATE',
+      targetPlanId: stringValue(payload, 'target_plan_id') || undefined,
+      previewHash: stringValue(payload, 'preview_hash'),
       warnings: Array.isArray(payload.warnings)
         ? payload.warnings.filter((item): item is string => typeof item === 'string')
         : [],
-      status:
-        approvalStatus === 'PENDING'
-          ? 'pending'
-          : approvalStatus === 'EDITED'
-            ? 'editing'
-            : approvalStatus === 'REJECTED'
-              ? 'rejected'
-              : 'approved',
-      approvalId: stringValue(refs, 'approval_id'),
-      approvalVersion: numberValue(refs, 'approval_version', 1),
+      status: (stringValue(payload, 'status', 'EXPIRED') === 'READY' &&
+      new Date(expiresAt).getTime() <= Date.now()
+        ? 'EXPIRED'
+        : stringValue(payload, 'status', 'EXPIRED')) as Extract<
+        ChatItem,
+        { kind: 'planPreview' }
+      >['status'],
     }
   }
   if (type === 'SourceCard') {
@@ -199,31 +160,6 @@ function mapCard(value: ApiObject): ChatItem | null {
       interactive: supported,
     }
   }
-  if (type === 'SelectionCard') {
-    const options = asArray(payload.options)
-    const actions = asArray(value.actions)
-    const submittedOptionIds = Array.isArray(payload.submitted_option_ids)
-      ? payload.submitted_option_ids.filter((item): item is string => typeof item === 'string')
-      : []
-    const selectedIndex = options.findIndex((item) =>
-      submittedOptionIds.includes(stringValue(item, 'id')),
-    )
-    const allowFreeText = stringValue(payload, 'input_mode') === 'NATURAL_LANGUAGE'
-    return {
-      key: stringValue(value, 'card_id'),
-      kind: 'selection',
-      title: stringValue(payload, 'question', '请选择'),
-      description: stringValue(payload, 'description', '选择会作为上下文提交，不会直接修改计划。'),
-      options: options.map((item) => stringValue(item, 'label')),
-      optionIds: options.map((item) => stringValue(item, 'id')),
-      selected: selectedIndex >= 0 ? selectedIndex : allowFreeText ? -1 : 0,
-      submitted: payload.submitted === true,
-      cardId: stringValue(value, 'card_id'),
-      allowFreeText,
-      inputPlaceholder: stringValue(payload, 'input_placeholder'),
-      submitLabel: actions[0] ? stringValue(actions[0], 'label', '确认选择') : '确认选择',
-    }
-  }
   if (type === 'StatusCard') {
     return {
       key: stringValue(value, 'card_id'),
@@ -245,6 +181,9 @@ export function mapMessage(value: ApiObject): ChatItem[] {
   }
   const structured = asObject(value.cards)
   const cards = structured ? asArray(structured.cards).map(mapCard).filter(Boolean) : []
+  for (const card of cards) {
+    if (card?.kind === 'planPreview') card.messageId = message.messageId
+  }
   return [message, ...(cards as ChatItem[])]
 }
 
@@ -282,15 +221,11 @@ function conversationTime(
 export function mapConversation(value: ConversationResponse): ConversationViewModel {
   const runStatus = value.active_run?.status
   const statusLabel =
-    runStatus === 'AWAITING_INPUT'
-      ? '待回复'
-      : runStatus === 'AWAITING_APPROVAL'
-        ? '待确认'
-        : runStatus === 'FAILED_RETRYABLE'
-          ? '待重试'
-          : runStatus && ['QUEUED', 'RUNNING', 'CANCEL_REQUESTED'].includes(runStatus)
-            ? '处理中'
-            : '已完成'
+    runStatus === 'FAILED_RETRYABLE'
+      ? '待重试'
+      : runStatus && ['QUEUED', 'RUNNING', 'CANCEL_REQUESTED'].includes(runStatus)
+        ? '处理中'
+        : '已完成'
   return {
     key: value.id,
     title: value.title,

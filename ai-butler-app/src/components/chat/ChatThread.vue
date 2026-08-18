@@ -1,20 +1,16 @@
 <script setup lang="ts">
 import ChatMessageBubble from '@/components/chat/ChatMessageBubble.vue'
-import ChatPlanCard from '@/components/chat/ChatPlanCard.vue'
-import ChatSelectionCard from '@/components/chat/ChatSelectionCard.vue'
+import ChatPlanPreviewCard from '@/components/chat/ChatPlanPreviewCard.vue'
 import ChatSourceCard from '@/components/chat/ChatSourceCard.vue'
 import ChatStatusCard from '@/components/chat/ChatStatusCard.vue'
 import type { ChatItem } from '@/types/view-models'
 
-type PlanItem = Extract<ChatItem, { kind: 'plan' }>
+type PlanItem = Extract<ChatItem, { kind: 'planPreview' }>
 type StatusItem = Extract<ChatItem, { kind: 'status' }>
 defineProps<{ items: ChatItem[]; fresh: boolean }>()
 defineEmits<{
-  selectOption: [itemKey: string, optionIndex: number]
-  submitSelection: [itemKey: string]
-  approvePlan: [item: PlanItem]
+  confirmPlan: [item: PlanItem]
   editPlan: [item: PlanItem]
-  rejectPlan: [item: PlanItem]
   openSource: [citationId: string]
   retryRun: [item: StatusItem]
 }>()
@@ -27,18 +23,11 @@ defineEmits<{
         v-if="item.kind === 'message' && (!fresh || item.role === 'user')"
         :item="item"
       />
-      <ChatSelectionCard
-        v-else-if="item.kind === 'selection'"
+      <ChatPlanPreviewCard
+        v-else-if="item.kind === 'planPreview'"
         :item="item"
-        @select-option="(key, index) => $emit('selectOption', key, index)"
-        @submit="(key) => $emit('submitSelection', key)"
-      />
-      <ChatPlanCard
-        v-else-if="item.kind === 'plan'"
-        :item="item"
-        @approve="(plan) => $emit('approvePlan', plan)"
+        @confirm="(plan) => $emit('confirmPlan', plan)"
         @edit="(plan) => $emit('editPlan', plan)"
-        @reject="(plan) => $emit('rejectPlan', plan)"
       />
       <ChatSourceCard
         v-else-if="item.kind === 'source'"

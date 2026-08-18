@@ -213,7 +213,7 @@ class UserService:
             await connection.execute(
                 text(
                     "UPDATE agent_runs SET status='CANCEL_REQUESTED',cancel_requested_at=:now "
-                    "WHERE user_id=:user_id AND status IN ('QUEUED','RUNNING','AWAITING_INPUT','AWAITING_APPROVAL')"
+                    "WHERE user_id=:user_id AND status IN ('QUEUED','RUNNING','CANCEL_REQUESTED')"
                 ),
                 {"user_id": user_id, "now": now},
             )

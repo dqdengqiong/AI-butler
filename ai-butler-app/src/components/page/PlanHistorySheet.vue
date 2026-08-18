@@ -7,7 +7,7 @@ defineEmits<{ close: [] }>()
 </script>
 
 <template>
-  <AppSheet :open="open" eyebrow="审批留痕" title="计划版本" @close="$emit('close')">
+  <AppSheet :open="open" eyebrow="确认留痕" title="计划版本" @close="$emit('close')">
     <view v-if="items.length" class="settings-list">
       <view v-for="item in items" :key="String(item.id)" class="setting-row">
         <view

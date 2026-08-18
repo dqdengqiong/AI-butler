@@ -43,7 +43,6 @@ class IntentRouterNode:
         recent_messages: tuple[str, ...],
         published_summaries: tuple[str, ...],
         active_plan_titles: tuple[str, ...],
-        pending_action: str | None,
         attachment_count: int,
         run_id: UUID,
     ) -> IntentDecisionV1:
@@ -57,30 +56,36 @@ class IntentRouterNode:
             "decision_rules": [
                 "当前 user_input 优先于历史；完整的新问题不得被旧话题错误归入旧流程。",
                 "普通寒暄和无需专业流程的问题为 GENERAL_CHAT。",
+                "安排今天任务为 DAILY_PLANNING，并请求计划与任务上下文。",
+                "复盘既有计划进度为 PLAN_REVIEW，并请求计划与任务上下文。",
+                "明确查找资料或来源为 RESEARCH。",
                 "只有当前问题明确涉及公考、行测、申论、招录或报名时才是 CIVIL_QA。",
                 "查询常见网站的固定网址属于 GENERAL_CHAT，不等同于要求联网搜索。",
                 "创建计划与调整计划必须区分。",
                 "明确记忆、更正、遗忘命令为 MEMORY。",
-                "明确联网请求或时效性事实设置 needs_web=true。",
-                "附件或我的资料请求设置 needs_private_knowledge=true。",
+                "创建或调整计划请求 PLAN_REQUIREMENTS。",
+                "明确联网请求或时效性事实请求 PUBLIC_KNOWLEDGE。",
+                "附件或我的资料请求 PRIVATE_KNOWLEDGE。",
+                "意图只表达上下文需求，不能返回工具名。",
                 "无法可靠判断或 confidence 小于 0.70 时为 CLARIFY，并只问一个问题。",
             ],
             "output_schema": {
                 "schema_version": "1.0",
                 "intent": (
-                    "GENERAL_CHAT|CIVIL_QA|PLAN_CREATE|PLAN_ADJUST|TASK_FEEDBACK|"
-                    "MEMORY|UNSUPPORTED|CLARIFY"
+                    "GENERAL_CHAT|CIVIL_QA|DAILY_PLANNING|PLAN_REVIEW|RESEARCH|"
+                    "PLAN_CREATE|PLAN_ADJUST|TASK_FEEDBACK|MEMORY|UNSUPPORTED|CLARIFY"
                 ),
                 "confidence": "0..1",
-                "needs_web": "boolean",
-                "needs_private_knowledge": "boolean",
+                "context_needs": (
+                    "PLAN_REQUIREMENTS|PLAN_CONTEXT|TASK_CONTEXT|PUBLIC_KNOWLEDGE|"
+                    "PRIVATE_KNOWLEDGE|MEMORY_COMMAND 的去重数组"
+                ),
                 "clarifying_question": "string|null",
             },
             "user_input": user_input,
             "recent_messages": recent_messages,
             "published_summaries": published_summaries,
             "active_plan_titles": active_plan_titles,
-            "pending_action": pending_action,
             "attachment_count": attachment_count,
         }
         parsed = await self._generate_and_parse(prompt, run_id)
@@ -114,9 +119,16 @@ class IntentRouterNode:
             decision.intent == "CIVIL_QA"
             and SITE_ADDRESS_QUESTION_PATTERN.fullmatch(user_input)
             and not CIVIL_DOMAIN_PATTERN.search(user_input)
-            and not decision.needs_private_knowledge
+            and "PRIVATE_KNOWLEDGE" not in decision.context_needs
         ):
-            return decision.model_copy(update={"intent": "GENERAL_CHAT", "needs_web": False})
+            return decision.model_copy(
+                update={
+                    "intent": "GENERAL_CHAT",
+                    "context_needs": tuple(
+                        item for item in decision.context_needs if item != "PUBLIC_KNOWLEDGE"
+                    ),
+                }
+            )
         return decision
 
     async def _generate_and_parse(
@@ -394,8 +406,7 @@ class ResponseNode:
                 async for event in stream_method(request):
                     yield event
                 return
-            # 测试或兼容适配器可能只实现旧 generate 接口；仍发送相同公开事件，
-            # 但生产 ModelGateway 始终走真实供应商增量流。
+            # 轻量测试适配器可能只实现 generate；仍发送相同公开事件。
             response = await self._llm.generate(request)
             yield ModelStreamEvent(delta=response.content)
             yield ModelStreamEvent(response=response)

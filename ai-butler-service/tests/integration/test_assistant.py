@@ -16,11 +16,18 @@ pytestmark = pytest.mark.integration
 
 def _settings(tmp_path: Path) -> Settings:
     return Settings(
+        model_routing_enabled=False,
         app_database_url=(
             "postgresql+psycopg://butler_test:butler_test@127.0.0.1:5432/butler_test"
         ),
         migration_database_url=(
             "postgresql+psycopg://butler_migrator:butler_migrator@127.0.0.1:5432/butler_test"
+        ),
+        langgraph_database_url=(
+            "postgresql://butler_test:butler_test@127.0.0.1:5432/butler_langgraph_test"
+        ),
+        langgraph_migration_database_url=(
+            "postgresql://butler_migrator:butler_migrator@127.0.0.1:5432/butler_langgraph_test"
         ),
         object_storage_local_path=tmp_path,
         public_base_url="http://test",
@@ -38,7 +45,7 @@ async def _complete_run(
     raise AssertionError("run was not claimed")
 
 
-async def test_v3_general_response_stream_and_research_are_model_driven(tmp_path: Path) -> None:
+async def test_general_response_stream_and_research_are_model_driven(tmp_path: Path) -> None:
     app = create_app(_settings(tmp_path))
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="http://test"
@@ -46,13 +53,13 @@ async def test_v3_general_response_stream_and_research_are_model_driven(tmp_path
         suffix = uuid4().hex
         login = await client.post(
             "/v1/auth/wechat/login",
-            headers={"Idempotency-Key": f"v3-login-{suffix}"},
+            headers={"Idempotency-Key": f"assistant-login-{suffix}"},
             json={
                 "schema_version": "1.0",
-                "login_code": f"v3-{suffix}",
-                "phone_code": f"phone-v3-{suffix}",
+                "login_code": f"assistant-{suffix}",
+                "phone_code": f"phone-assistant-{suffix}",
                 "provider": "WECHAT_MOCK",
-                "device_id": f"v3-device-{suffix}",
+                "device_id": f"assistant-device-{suffix}",
                 "consent": {
                     "terms_version": "2026-08-01",
                     "privacy_version": "2026-08-01",
@@ -69,7 +76,6 @@ async def test_v3_general_response_stream_and_research_are_model_driven(tmp_path
                 "client_message_id": f"general-{suffix}",
                 "content": "你好，请简单说明怎样建立稳定的学习习惯",
                 "attachments": [],
-                "selection": None,
             },
         )
         run_id = general.json()["run"]["id"]
@@ -117,18 +123,19 @@ async def test_v3_general_response_stream_and_research_are_model_driven(tmp_path
                     )
                 ).scalars()
             )
-        assert tuple(versions) == ("butler-graph-v3", "butler-prompts-v3")
-        assert {"Router", "Response"} <= nodes
+        assert tuple(versions) == ("butler-graph-v1", "butler-prompts-v1")
+        assert {"Initialize", "Router", "Response"} <= nodes
 
         researched = await client.post(
-            f"/v1/conversations/{conversation_id}/messages",
+            "/v1/messages",
             headers=headers,
             json={
                 "schema_version": "1.0",
                 "client_message_id": f"research-{suffix}",
+                "target_conversation_id": conversation_id,
+                "context_policy": "CONTINUE_CURRENT",
                 "content": "请联网查询最新公务员考试资料",
                 "attachments": [],
-                "selection": None,
             },
         )
         research_run_id = researched.json()["run"]["id"]

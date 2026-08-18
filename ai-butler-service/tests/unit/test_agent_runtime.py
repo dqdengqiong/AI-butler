@@ -4,13 +4,9 @@ from uuid import UUID
 import pytest
 
 from ai_butler.agent.contracts import ContextBundleV1, ContextItemV1
-from ai_butler.agent.runtime import (
-    DEFAULT_CAPABILITY_REGISTRY,
-    ContextBudgetGuard,
-    MemoryCandidate,
-    MemoryPolicy,
-)
+from ai_butler.agent.runtime import ContextBudgetGuard, MemoryCandidate, MemoryPolicy
 from ai_butler.domain.errors import ButlerError
+from ai_butler.tools import DEFAULT_TOOL_REGISTRY
 
 USER_ID = UUID("00000000-0000-4000-8000-000000000001")
 RUN_ID = UUID("00000000-0000-4000-8000-000000000002")
@@ -28,7 +24,7 @@ def test_context_budget_keeps_required_facts_and_drops_low_priority_evidence() -
         run_id=RUN_ID,
         thread_id="thread",
         current_input=_item("input", 100, "USER_CONTENT"),
-        business_facts=(_item("approval", 100),),
+        business_facts=(_item("active-plan", 100),),
         messages=(_item("old", 100), _item("new", 100)),
         evidence=(_item("external", 100, "EXTERNAL_UNTRUSTED"),),
     )
@@ -43,21 +39,19 @@ def test_required_context_fails_closed_when_over_budget() -> None:
         run_id=RUN_ID,
         thread_id="thread",
         current_input=_item("input", 300, "USER_CONTENT"),
-        business_facts=(_item("approval", 300),),
+        business_facts=(_item("active-plan", 300),),
     )
     with pytest.raises(ButlerError, match="必要上下文"):
         ContextBudgetGuard(512).compact(bundle)
 
 
-def test_capability_gate_requires_approval_and_rejects_replay_writes() -> None:
-    with pytest.raises(ButlerError) as approval_error:
-        DEFAULT_CAPABILITY_REGISTRY.require("plan_publish", "Executor", approved=False)
-    assert approval_error.value.code == "APPROVAL_REQUIRED"
-    with pytest.raises(ButlerError) as replay_error:
-        DEFAULT_CAPABILITY_REGISTRY.require(
-            "plan_draft_write", "Planner", approved=True, replay=True
-        )
-    assert replay_error.value.code == "REPLAY_READ_ONLY"
+def test_tool_gate_allows_only_registered_intent_node_pairs() -> None:
+    DEFAULT_TOOL_REGISTRY.require("read_plan_context", "ToolExecutor", "PLAN_REVIEW")
+    with pytest.raises(ButlerError) as forbidden:
+        DEFAULT_TOOL_REGISTRY.require("read_plan_context", "Response", "PLAN_REVIEW")
+    assert forbidden.value.code == "TOOL_FORBIDDEN"
+    with pytest.raises(ButlerError):
+        DEFAULT_TOOL_REGISTRY.require("read_plan_context", "ToolExecutor", "GENERAL_CHAT")
 
 
 def test_memory_policy_rejects_sensitive_and_applies_category_ttl() -> None:

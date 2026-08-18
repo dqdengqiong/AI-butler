@@ -93,7 +93,6 @@ async def test_intent_router_covers_all_business_intents(content: str, expected:
         recent_messages=(),
         published_summaries=(),
         active_plan_titles=(),
-        pending_action=None,
         attachment_count=0,
         run_id=uuid4(),
     )
@@ -107,8 +106,7 @@ async def test_intent_router_repairs_once_then_clarifies_low_confidence() -> Non
             "schema_version": "1.0",
             "intent": "PLAN_CREATE",
             "confidence": 0.4,
-            "needs_web": False,
-            "needs_private_knowledge": False,
+            "context_needs": ["PLAN_REQUIREMENTS"],
             "clarifying_question": None,
         }
     )
@@ -119,7 +117,6 @@ async def test_intent_router_repairs_once_then_clarifies_low_confidence() -> Non
         recent_messages=(),
         published_summaries=(),
         active_plan_titles=(),
-        pending_action=None,
         attachment_count=0,
         run_id=uuid4(),
     )
@@ -136,8 +133,7 @@ async def test_intent_router_keeps_explicit_site_question_out_of_prior_civil_con
                     "schema_version": "1.0",
                     "intent": "CIVIL_QA",
                     "confidence": 0.95,
-                    "needs_web": True,
-                    "needs_private_knowledge": False,
+                    "context_needs": ["PUBLIC_KNOWLEDGE"],
                     "clarifying_question": None,
                 }
             )
@@ -149,13 +145,12 @@ async def test_intent_router_keeps_explicit_site_question_out_of_prior_civil_con
         recent_messages=("此前讨论的是行测复习。",),
         published_summaries=(),
         active_plan_titles=("公考计划",),
-        pending_action=None,
         attachment_count=0,
         run_id=uuid4(),
     )
 
     assert result.intent == "GENERAL_CHAT"
-    assert result.needs_web is False
+    assert "PUBLIC_KNOWLEDGE" not in result.context_needs
 
 
 async def test_planner_and_executor_fake_results_pass_deterministic_review() -> None:

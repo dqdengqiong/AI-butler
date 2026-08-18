@@ -20,7 +20,7 @@ defineEmits<{
         ><text class="setting-arrow">›</text>
       </button>
       <button class="setting-row setting-button" @click="$emit('openHistory')">
-        <view><text>计划版本</text><text>查看调整记录与审批留痕</text></view
+        <view><text>计划版本</text><text>查看调整记录与确认留痕</text></view
         ><text class="setting-arrow">›</text>
       </button>
       <view class="setting-row">

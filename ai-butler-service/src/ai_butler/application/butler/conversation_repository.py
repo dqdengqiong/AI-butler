@@ -182,13 +182,6 @@ class ConversationRepository:
             ),
             {"run_id": run["id"]},
         )
-        await connection.execute(
-            text(
-                "UPDATE approval_decisions SET status='CANCELLED',decided_at=now() "
-                "WHERE agent_run_id=:run_id AND status='PENDING'"
-            ),
-            {"run_id": run["id"]},
-        )
         await self._append_event(
             connection,
             UUID(str(run["id"])),

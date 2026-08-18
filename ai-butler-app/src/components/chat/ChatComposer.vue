@@ -3,11 +3,11 @@ import { computed, ref } from 'vue'
 
 import type { AgentShortcutViewModel, ChatItem, UploadedAttachment } from '@/types/view-models'
 
-type SelectionItem = Extract<ChatItem, { kind: 'selection' }>
 const props = defineProps<{
   items: ChatItem[]
   attachments: UploadedAttachment[]
   activeAgent?: AgentShortcutViewModel
+  busy?: boolean
 }>()
 const emit = defineEmits<{
   send: [content: string]
@@ -17,32 +17,57 @@ const emit = defineEmits<{
 
 const draft = ref('')
 const isRecording = ref(false)
+const shortcutSending = ref(false)
 const canSend = computed(() => draft.value.trim().length > 0 || props.attachments.length > 0)
-const activeNaturalLanguagePrompt = computed<SelectionItem | undefined>(() => {
-  for (let index = props.items.length - 1; index >= 0; index -= 1) {
-    const item = props.items[index]
-    if (item?.kind === 'selection' && item.allowFreeText && !item.submitted) return item
-  }
-  return undefined
-})
-const placeholder = computed(() =>
-  isRecording.value
-    ? '正在聆听…'
-    : activeNaturalLanguagePrompt.value?.inputPlaceholder || '发消息或按住说话…',
-)
+const placeholder = computed(() => (isRecording.value ? '正在聆听…' : '发消息或按住说话…'))
 const quickPrompts = computed(() =>
   props.activeAgent
     ? props.activeAgent.starterPrompts.map((prompt) => ({
         icon: props.activeAgent?.icon ?? '✦',
         title: prompt.label,
         prompt: prompt.content,
+        behavior: prompt.behavior,
       }))
     : [
-        { icon: '◎', title: '规划今天', prompt: '根据我的计划，帮我安排今天最重要的三件事' },
-        { icon: '✓', title: '复盘进度', prompt: '帮我复盘本周计划进度，并给出调整建议' },
-        { icon: '◌', title: '查找资料', prompt: '帮我查找可靠资料，并标注信息来源' },
+        {
+          icon: '◎',
+          title: '规划今天',
+          prompt: '根据我的计划，帮我安排今天最重要的三件事',
+          behavior: 'FILL_COMPOSER' as const,
+        },
+        {
+          icon: '✓',
+          title: '复盘进度',
+          prompt: '帮我复盘本周计划进度，并给出调整建议',
+          behavior: 'FILL_COMPOSER' as const,
+        },
+        {
+          icon: '◌',
+          title: '查找资料',
+          prompt: '帮我查找可靠资料，并标注信息来源',
+          behavior: 'FILL_COMPOSER' as const,
+        },
       ],
 )
+
+function choosePrompt(prompt: (typeof quickPrompts.value)[number]): void {
+  if (prompt.behavior === 'FILL_COMPOSER') {
+    draft.value = prompt.prompt
+    return
+  }
+  if (props.busy || shortcutSending.value) return
+  shortcutSending.value = true
+  emit('send', prompt.prompt)
+  setTimeout(() => {
+    shortcutSending.value = false
+  }, 800)
+}
+
+function prefill(content: string): void {
+  draft.value = content
+}
+
+defineExpose({ prefill })
 
 function submit(): void {
   if (!canSend.value) {
@@ -58,7 +83,12 @@ function submit(): void {
 <template>
   <view class="composer-area">
     <view class="quick-prompts">
-      <button v-for="prompt in quickPrompts" :key="prompt.title" @click="draft = prompt.prompt">
+      <button
+        v-for="prompt in quickPrompts"
+        :key="prompt.title"
+        :disabled="prompt.behavior === 'SEND_MESSAGE' && (busy || shortcutSending)"
+        @click="choosePrompt(prompt)"
+      >
         <text class="prompt-icon">{{ prompt.icon }}</text
         ><text>{{ prompt.title }}</text>
       </button>

@@ -23,9 +23,7 @@ SENSITIVE_PATTERN = re.compile(
     r"|(?:\b1[3-9]\d{9}\b)|(?:\b\d{15,18}[0-9Xx]\b)"
 )
 TEMPORARY_PATTERN = re.compile(r"(?:今天|这次|本次|暂时|当前|刚刚|稍后|明天)")
-BUSINESS_ENTITY_PATTERN = re.compile(
-    r"(?:plan_id|task_id|approval_id|run_id|[0-9a-f]{8}-[0-9a-f-]{27})", re.I
-)
+BUSINESS_ENTITY_PATTERN = re.compile(r"(?:plan_id|task_id|run_id|[0-9a-f]{8}-[0-9a-f-]{27})", re.I)
 AUTOMATIC_PATTERN = re.compile(r"(?:我喜欢|我习惯|我通常|我的长期目标是)[：:\s]*(.+)")
 
 

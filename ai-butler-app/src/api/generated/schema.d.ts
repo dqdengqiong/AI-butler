@@ -143,23 +143,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/v1/approvals/{approval_id}/decisions": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /** Decide */
-        post: operations["decide_v1_approvals__approval_id__decisions_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/v1/auth/config": {
         parameters: {
             query?: never;
@@ -573,6 +556,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/plan-previews/{message_id}/confirm": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Confirm Plan Preview
+         * @description 确认只读预览，并在一个数据库事务中创建全部正式业务对象。
+         */
+        post: operations["confirm_plan_preview_v1_plan_previews__message_id__confirm_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/plans": {
         parameters: {
             query?: never;
@@ -601,7 +604,8 @@ export interface paths {
         get: operations["plan_v1_plans__plan_id__get"];
         put?: never;
         post?: never;
-        delete?: never;
+        /** Delete Plan */
+        delete: operations["delete_plan_v1_plans__plan_id__delete"];
         options?: never;
         head?: never;
         patch?: never;
@@ -712,9 +716,9 @@ export interface components {
             attempt: number;
             /**
              * Execution Mode
-             * @enum {string}
+             * @constant
              */
-            execution_mode: "START" | "INPUT_RESUME";
+            execution_mode: "START";
             /**
              * Id
              * Format: uuid
@@ -760,39 +764,16 @@ export interface components {
         };
         /** AgentStarterPromptResponse */
         AgentStarterPromptResponse: {
+            /**
+             * Behavior
+             * @default FILL_COMPOSER
+             * @enum {string}
+             */
+            behavior: "SEND_MESSAGE" | "FILL_COMPOSER";
             /** Content */
             content: string;
             /** Label */
             label: string;
-        };
-        /** ApprovalDecisionRequest */
-        ApprovalDecisionRequest: {
-            /**
-             * Action
-             * @enum {string}
-             */
-            action: "APPROVE" | "EDIT" | "REJECT";
-            /**
-             * Approval Id
-             * Format: uuid
-             */
-            approval_id: string;
-            /**
-             * Execution Policy
-             * @default REJECT
-             * @enum {string}
-             */
-            execution_policy: "REJECT" | "CANCEL_OTHER";
-            /** Expected Approval Version */
-            expected_approval_version: number;
-            /** Feedback */
-            feedback?: string | null;
-            /**
-             * Schema Version
-             * @default 1.0
-             * @constant
-             */
-            schema_version: "1.0";
         };
         /** AttachmentInput */
         AttachmentInput: {
@@ -849,7 +830,7 @@ export interface components {
         /** CardCollection */
         CardCollection: {
             /** Cards */
-            cards?: (components["schemas"]["PlanCardV11"] | {
+            cards?: (components["schemas"]["PlanPreviewCardV1"] | {
                 [key: string]: unknown;
             })[];
         };
@@ -1107,17 +1088,83 @@ export interface components {
             /** Resend After */
             resend_after: number;
         };
-        /** PlanCardPayloadV11 */
-        PlanCardPayloadV11: {
+        /** PlanConfirmationResponseV1 */
+        PlanConfirmationResponseV1: {
+            /**
+             * Plan Id
+             * Format: uuid
+             */
+            plan_id: string;
+            /**
+             * Preview Message Id
+             * Format: uuid
+             */
+            preview_message_id: string;
+            /**
+             * Revision Id
+             * Format: uuid
+             */
+            revision_id: string;
+            /**
+             * Schema Version
+             * @default 1.0
+             * @constant
+             */
+            schema_version: "1.0";
+            /**
+             * Status
+             * @default CONFIRMED
+             * @constant
+             */
+            status: "CONFIRMED";
+            /** Task Ids */
+            task_ids: string[];
+        };
+        /** PlanPreviewCardPayloadV1 */
+        PlanPreviewCardPayloadV1: {
+            /** Availability */
+            availability: {
+                [key: string]: unknown;
+            };
             /** Available Weekly Minutes */
             available_weekly_minutes: number;
+            /** Evidence */
+            evidence?: {
+                [key: string]: unknown;
+            }[];
+            /** Expected Current Revision Id */
+            expected_current_revision_id?: string | null;
             /**
-             * Mode
+             * Expires At
+             * Format: date-time
+             */
+            expires_at: string;
+            /**
+             * Generated At
+             * Format: date-time
+             */
+            generated_at: string;
+            /**
+             * Operation
              * @enum {string}
              */
-            mode: "SINGLE_PLAN_CREATE" | "SINGLE_PLAN_ADJUST" | "BUNDLE_CREATE";
-            /** Plans */
-            plans: components["schemas"]["PlanCardPlanV11"][];
+            operation: "CREATE" | "ADJUST";
+            plan: components["schemas"]["PlanPreviewPlanV1"];
+            /** Preview Hash */
+            preview_hash: string;
+            /** Scenario Code */
+            scenario_code: string;
+            /** Scenario Fields */
+            scenario_fields: {
+                [key: string]: string;
+            };
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "READY" | "CONFIRMED" | "SUPERSEDED" | "DISMISSED" | "EXPIRED";
+            /** Target Plan Id */
+            target_plan_id?: string | null;
             /** Title */
             title: string;
             /** Total Weekly Minutes */
@@ -1125,36 +1172,11 @@ export interface components {
             /** Warnings */
             warnings?: string[];
         };
-        /** PlanCardPlanV11 */
-        PlanCardPlanV11: {
-            /** End Date */
-            end_date?: string | null;
-            /** Objective Summary */
-            objective_summary: string;
-            /**
-             * Plan Id
-             * Format: uuid
-             */
-            plan_id: string;
-            /**
-             * Plan Revision Id
-             * Format: uuid
-             */
-            plan_revision_id: string;
-            /** Start Date */
-            start_date?: string | null;
-            /** Title */
-            title: string;
-            /** Weekly Minutes */
-            weekly_minutes: number;
-            /** Work Item Id */
-            work_item_id: string;
-        };
         /**
-         * PlanCardV11
-         * @description 新输出计划卡；MessageResponse 仍允许历史 1.0 与未知卡片只读透传。
+         * PlanPreviewCardV1
+         * @description 确认前只存在于聊天消息中的计划预览，不引用未落库业务实体。
          */
-        PlanCardV11: {
+        PlanPreviewCardV1: {
             /** Actions */
             actions: {
                 [key: string]: unknown;
@@ -1168,17 +1190,69 @@ export interface components {
              * Card Type
              * @constant
              */
-            card_type: "PlanCard";
+            card_type: "PlanPreviewCard";
             /** Entity Refs */
-            entity_refs: {
+            entity_refs?: {
                 [key: string]: unknown;
             };
-            payload: components["schemas"]["PlanCardPayloadV11"];
+            payload: components["schemas"]["PlanPreviewCardPayloadV1"];
             /**
              * Schema Version
              * @constant
              */
-            schema_version: "1.1";
+            schema_version: "1.0";
+        };
+        /** PlanPreviewConfirmationRequestV1 */
+        PlanPreviewConfirmationRequestV1: {
+            /** Expected Preview Hash */
+            expected_preview_hash: string;
+            /**
+             * Schema Version
+             * @default 1.0
+             * @constant
+             */
+            schema_version: "1.0";
+        };
+        /** PlanPreviewPlanV1 */
+        PlanPreviewPlanV1: {
+            /**
+             * End Date
+             * Format: date
+             */
+            end_date: string;
+            /** Objective Summary */
+            objective_summary: string;
+            /** Stages */
+            stages?: {
+                [key: string]: unknown;
+            }[];
+            /**
+             * Start Date
+             * Format: date
+             */
+            start_date: string;
+            /** Tasks */
+            tasks?: components["schemas"]["PlanPreviewTaskV1"][];
+            /** Title */
+            title: string;
+            /** Weekly Minutes */
+            weekly_minutes: number;
+        };
+        /** PlanPreviewTaskV1 */
+        PlanPreviewTaskV1: {
+            /** Expected Minutes */
+            expected_minutes: number;
+            /** Priority */
+            priority: number;
+            /**
+             * Scheduled Date
+             * Format: date
+             */
+            scheduled_date: string;
+            /** Task Key */
+            task_key: string;
+            /** Title */
+            title: string;
         };
         /** PreferencesRequest */
         PreferencesRequest: {
@@ -1284,18 +1358,6 @@ export interface components {
             /** Ticket */
             ticket: string;
         };
-        /** SelectionInput */
-        SelectionInput: {
-            /** Action Id */
-            action_id: string;
-            /**
-             * Card Id
-             * Format: uuid
-             */
-            card_id: string;
-            /** Selected Option Ids */
-            selected_option_ids: string[];
-        };
         /** SendMessageRequest */
         SendMessageRequest: {
             /** Attachments */
@@ -1325,7 +1387,6 @@ export interface components {
              * @constant
              */
             schema_version: "1.0";
-            selection?: components["schemas"]["SelectionInput"] | null;
             /** Specialist Code */
             specialist_code?: string | null;
             /** Target Conversation Id */
@@ -1738,45 +1799,6 @@ export interface operations {
             cookie?: never;
         };
         requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    decide_v1_approvals__approval_id__decisions_post: {
-        parameters: {
-            query?: never;
-            header?: {
-                authorization?: string | null;
-            };
-            path: {
-                approval_id: string;
-            };
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["ApprovalDecisionRequest"];
-            };
-        };
         responses: {
             /** @description Successful Response */
             200: {
@@ -2833,6 +2855,44 @@ export interface operations {
             };
         };
     };
+    confirm_plan_preview_v1_plan_previews__message_id__confirm_post: {
+        parameters: {
+            query?: never;
+            header: {
+                "Idempotency-Key": string;
+                authorization?: string | null;
+            };
+            path: {
+                message_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PlanPreviewConfirmationRequestV1"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PlanConfirmationResponseV1"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     plans_v1_plans_get: {
         parameters: {
             query?: never;
@@ -2889,6 +2949,38 @@ export interface operations {
                         [key: string]: unknown;
                     };
                 };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    delete_plan_v1_plans__plan_id__delete: {
+        parameters: {
+            query?: never;
+            header: {
+                "Idempotency-Key": string;
+                authorization?: string | null;
+            };
+            path: {
+                plan_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             /** @description Validation Error */
             422: {

@@ -30,15 +30,19 @@ SEARCH_PATTERN = re.compile(
 )
 WEB_FORCE_PATTERN = re.compile(r"政策|公告|报名|考试时间|岗位|大纲|联网|搜索|查询|最新|今年|202\d")
 PRIVATE_SEARCH_PATTERN = re.compile(r"我的资料|附件|文件|文档")
-NON_TERMINAL_RUN_SQL = (
-    "'QUEUED','RUNNING','AWAITING_INPUT','AWAITING_APPROVAL','FAILED_RETRYABLE','CANCEL_REQUESTED'"
-)
+NON_TERMINAL_RUN_SQL = "'QUEUED','RUNNING','FAILED_RETRYABLE','CANCEL_REQUESTED'"
 EXECUTING_RUN_SQL = "'QUEUED','RUNNING','CANCEL_REQUESTED'"
-SUSPENDED_RUN_SQL = "'AWAITING_INPUT','AWAITING_APPROVAL','FAILED_RETRYABLE'"
 
 
 def _json(value: object) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
+def _content_hash(value: object) -> str:
+    """对 JSON 兼容对象生成与字典键顺序无关的内容哈希。"""
+
+    canonical = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode()).hexdigest()
 
 
 def _row(result: Any) -> dict[str, Any] | None:
@@ -68,7 +72,9 @@ def _decode_cursor(cursor: str, expected_parts: int) -> list[str]:
     return value
 
 
-def _message_request_hash(request: SendMessageRequest) -> str:
+def _message_request_hash(
+    request: SendMessageRequest, structured_input: dict[str, object] | None = None
+) -> str:
     """计算会话内消息幂等哈希，附件按展示位置排序后进入摘要。"""
 
     canonical = {
@@ -77,6 +83,6 @@ def _message_request_hash(request: SendMessageRequest) -> str:
             ((item.position, str(item.file_id)) for item in request.attachments),
             key=lambda item: item[0],
         ),
-        "selection": request.selection.model_dump(mode="json") if request.selection else None,
+        "structured_input": structured_input or {},
     }
-    return hashlib.sha256(_json(canonical).encode()).hexdigest()
+    return _content_hash(canonical)

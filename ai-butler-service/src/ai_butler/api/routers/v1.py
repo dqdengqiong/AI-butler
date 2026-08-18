@@ -14,7 +14,6 @@ from fastapi.responses import StreamingResponse
 from ai_butler.api.dependencies import Butler, CurrentUserId
 from ai_butler.api.schemas import (
     AgentDefinitionListResponse,
-    ApprovalDecisionRequest,
     AuthConfigResponse,
     AvailabilityRequest,
     CitationResponseV1,
@@ -27,6 +26,8 @@ from ai_butler.api.schemas import (
     PhoneLoginRequest,
     PhoneVerificationCodeRequest,
     PhoneVerificationCodeResponse,
+    PlanConfirmationResponseV1,
+    PlanPreviewConfirmationRequestV1,
     PreferencesRequest,
     ProfileRequest,
     RefreshRequest,
@@ -193,6 +194,17 @@ async def plan(plan_id: UUID, user_id: CurrentUserId, butler: Butler) -> dict[st
     return await butler.get_plan(user_id, plan_id)
 
 
+@router.delete("/plans/{plan_id}", status_code=status.HTTP_204_NO_CONTENT, tags=["planning"])
+async def delete_plan(
+    plan_id: UUID,
+    user_id: CurrentUserId,
+    butler: Butler,
+    idempotency_key: str = Header(alias="Idempotency-Key"),
+) -> Response:
+    await butler.delete_plan(user_id, plan_id, idempotency_key)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
 @router.get("/plans/{plan_id}/revisions", tags=["planning"])
 async def revisions(plan_id: UUID, user_id: CurrentUserId, butler: Butler) -> dict[str, object]:
     return await butler.list_revisions(user_id, plan_id)
@@ -306,25 +318,20 @@ async def send_message(
 
 
 @router.post(
-    "/conversations/{conversation_id}/messages",
-    status_code=status.HTTP_202_ACCEPTED,
-    include_in_schema=False,
+    "/plan-previews/{message_id}/confirm",
+    response_model=PlanConfirmationResponseV1,
+    tags=["planning"],
 )
-async def send_message_legacy(
-    conversation_id: UUID,
-    payload: SendMessageRequest,
+async def confirm_plan_preview(
+    message_id: UUID,
+    payload: PlanPreviewConfirmationRequestV1,
     user_id: CurrentUserId,
     butler: Butler,
+    idempotency_key: str = Header(alias="Idempotency-Key"),
 ) -> dict[str, object]:
-    """兼容旧客户端；不属于公共契约，也不提供创建新场景能力。"""
+    """确认只读预览，并在一个数据库事务中创建全部正式业务对象。"""
 
-    targeted = payload.model_copy(
-        update={
-            "target_conversation_id": conversation_id,
-            "context_policy": "CONTINUE_CURRENT",
-        }
-    )
-    return await butler.send_message(user_id, targeted)
+    return await butler.confirm_plan_preview(user_id, message_id, payload, idempotency_key)
 
 
 @router.get("/agent-runs/{run_id}", tags=["chat"])
@@ -403,16 +410,6 @@ async def retry_run(
     return await butler.retry_run(
         user_id, run_id, payload.expected_attempt, payload.execution_policy
     )
-
-
-@router.post("/approvals/{approval_id}/decisions", tags=["chat"])
-async def decide(
-    approval_id: UUID,
-    payload: ApprovalDecisionRequest,
-    user_id: CurrentUserId,
-    butler: Butler,
-) -> dict[str, object]:
-    return await butler.decide_approval(user_id, approval_id, payload)
 
 
 @router.post("/files/upload-intents", status_code=status.HTTP_201_CREATED, tags=["files"])

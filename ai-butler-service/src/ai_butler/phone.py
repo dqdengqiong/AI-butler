@@ -78,5 +78,10 @@ def _encode(value: bytes) -> str:
 
 
 def _decode(value: str) -> bytes:
+    if not value or re.fullmatch(r"[A-Za-z0-9_-]+", value) is None:
+        raise binascii.Error("invalid base64url value")
     padding = "=" * (-len(value) % 4)
-    return base64.urlsafe_b64decode(f"{value}{padding}")
+    decoded = base64.urlsafe_b64decode(f"{value}{padding}")
+    if _encode(decoded) != value:
+        raise binascii.Error("non-canonical base64url value")
+    return decoded

@@ -58,6 +58,7 @@ class PlannerNode:
                 "每个 stage_key 必须与 stage_windows 中对应项完全一致且顺序相同。",
                 "每阶段只能建议 1 至 2 个任务模板。",
                 "每阶段任务的 days_per_week × expected_minutes 总和不得超过 weekly_minutes。",
+                "expected_minutes 不得超过用户任一可学习日容量的 85%。",
                 "具体政策事实只能引用 verified_claims 中已有 claim_key。",
                 "日期、顺序、稳定 key 与容量由服务端生成，输出中不得添加这些字段。",
             ],

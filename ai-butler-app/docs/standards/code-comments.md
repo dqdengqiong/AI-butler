@@ -34,7 +34,7 @@
  *
  * chunk 是网络层解码后的文本，可能以半帧结束；remainder 必须跨调用保留。
  * 服务端重连时可能重放最后一个 sequence，本函数会静默去重，避免消息和
- * 审批卡重复落入 store。协议错误会显式抛出，由调用方切换到可重试状态。
+ * 预览卡重复落入 store。协议错误会显式抛出，由调用方切换到可重试状态。
  */
 export function appendSseChunk(chunk: string, remainder: string): ParseResult {
   // ...

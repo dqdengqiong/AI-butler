@@ -32,7 +32,8 @@ describe('business API facade', () => {
       butlerApi.cancelRun('run/id', token),
       butlerApi.retryRun('run/id', {} as never, token),
       butlerApi.streamTicket('run/id', token),
-      butlerApi.approve('approval/id', {} as never, token),
+      butlerApi.deletePlan('plan/id', token),
+      butlerApi.confirmPlanPreview('message/id', {} as never, token),
       butlerApi.preferences(token),
       butlerApi.updatePreferences({} as never, token),
       butlerApi.deleteAccount(token),
@@ -63,6 +64,13 @@ describe('business API facade', () => {
     )
     expect(requestMock).toHaveBeenCalledWith(
       expect.objectContaining({ path: '/v1/agent-runs/run%2Fid/retry', method: 'POST' }),
+    )
+    expect(requestMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        path: '/v1/plans/plan%2Fid',
+        method: 'DELETE',
+        headers: expect.objectContaining({ 'Idempotency-Key': expect.any(String) }),
+      }),
     )
     expect(requestMock).toHaveBeenCalledWith(
       expect.objectContaining({

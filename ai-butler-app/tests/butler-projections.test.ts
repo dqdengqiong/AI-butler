@@ -1,143 +1,196 @@
 import { describe, expect, it } from 'vitest'
 
-import { mapMessage, runErrorPresentation } from '@/stores/butler-projections'
+import {
+  asArray,
+  asObject,
+  mapAgentDefinition,
+  mapConversation,
+  mapMessage,
+  mapPlan,
+  mapTask,
+  numberValue,
+  runErrorPresentation,
+  stringValue,
+} from '@/stores/butler-projections'
 
-function planMessage(card: Record<string, unknown>) {
-  return mapMessage({ id: 'message', role: 'ASSISTANT', content: '草案', cards: { cards: [card] } })
-}
-
-describe('PlanCard projections', () => {
-  it('maps a valid PlanCard 1.1 bundle with independent work items', () => {
-    const items = planMessage({
-      schema_version: '1.1',
-      card_id: 'bundle-card',
-      card_type: 'PlanCard',
-      entity_refs: { approval_id: 'approval', approval_version: 1 },
-      payload: {
-        mode: 'BUNDLE_CREATE',
-        title: '组合计划',
-        total_weekly_minutes: 300,
-        warnings: ['总负荷已按可用时间裁剪'],
-        plans: [
+describe('stateless chat projections', () => {
+  it('ignores removed client action cards', () => {
+    const items = mapMessage({
+      id: 'message-1',
+      role: 'ASSISTANT',
+      content: '请填写表单',
+      cards: {
+        cards: [
           {
-            work_item_id: 'work-1',
-            title: '省考计划',
-            objective_summary: '行测基础',
-            weekly_minutes: 180,
-            start_date: '2026-08-18',
-            end_date: '2026-10-12',
-          },
-          {
-            work_item_id: 'work-2',
-            title: '申论计划',
-            objective_summary: '申论训练',
-            weekly_minutes: 120,
+            schema_version: '1.0',
+            card_id: 'action-1',
+            card_type: 'ClientActionCard',
+            payload: {
+              action: 'OPEN_PLAN_FORM',
+              operation: 'CREATE',
+              objective_prefill: '准备省考',
+            },
+            actions: [],
           },
         ],
       },
     })
+    expect(items.map((item) => item.kind)).toEqual(['message'])
+  })
 
+  it('maps a read-only preview and binds it to the assistant message', () => {
+    const items = mapMessage({
+      id: 'preview-message',
+      role: 'ASSISTANT',
+      content: '预览已生成',
+      cards: {
+        cards: [
+          {
+            schema_version: '1.0',
+            card_id: 'preview-card',
+            card_type: 'PlanPreviewCard',
+            payload: {
+              status: 'READY',
+              operation: 'CREATE',
+              title: '省考计划',
+              total_weekly_minutes: 255,
+              available_weekly_minutes: 300,
+              preview_hash: 'a'.repeat(64),
+              plan: {
+                objective_summary: '准备省考',
+                start_date: '2026-08-18',
+                end_date: '2026-09-15',
+              },
+              warnings: [],
+            },
+            actions: [],
+          },
+        ],
+      },
+    })
     expect(items[1]).toMatchObject({
-      kind: 'plan',
-      schemaVersion: '1.1',
-      mode: 'BUNDLE_CREATE',
-      weeklyMinutes: 300,
-      warnings: ['总负荷已按可用时间裁剪'],
-      plans: [
-        {
-          key: 'work-1',
-          weeklyMinutes: 180,
-          startDate: '2026-08-18',
-          endDate: '2026-10-12',
-        },
-        { key: 'work-2', weeklyMinutes: 120 },
-      ],
+      kind: 'planPreview',
+      messageId: 'preview-message',
+      status: 'READY',
+      weeklyMinutes: 255,
     })
   })
 
-  it('uses plan-specific failure copy without implying that a plan was created', () => {
-    expect(runErrorPresentation('PLANNER_MODEL_UNAVAILABLE', true)).toEqual({
-      title: '计划生成超时',
-      description: '计划生成超时，本次未创建计划，可以重试。',
+  it('has no waiting status projection', () => {
+    const conversation = mapConversation({
+      id: 'conversation-1',
+      title: '对话',
+      status: 'CURRENT',
+      specialist: null,
+      last_message: null,
+      last_message_at: null,
+      active_run: { id: 'run-1', status: 'RUNNING' },
+      created_at: '2026-08-18T00:00:00Z',
+      updated_at: '2026-08-18T00:00:00Z',
     })
-    expect(runErrorPresentation('PLANNER_MODEL_INVALID', false)).toEqual({
-      title: '计划草稿校验失败',
-      description: '计划草稿未通过校验，本次未创建计划。',
-    })
+    expect(conversation.statusLabel).toBe('处理中')
   })
 
-  it('projects period collection and final scope confirmation cards', () => {
-    const period = planMessage({
-      card_id: 'period',
-      card_type: 'SelectionCard',
-      payload: {
-        phase: 'COLLECT_PLAN_PERIOD',
-        question: '选择计划周期',
-        input_mode: 'NATURAL_LANGUAGE',
-        options: [{ id: 'period-4-weeks', label: '4 周' }],
+  it('covers safe source, status and unknown card degradation', () => {
+    const items = mapMessage({
+      id: 'cards',
+      role: 'SYSTEM_EVENT',
+      cards: {
+        cards: [
+          {
+            schema_version: '1.0',
+            card_id: 'source',
+            card_type: 'SourceCard',
+            payload: {
+              sources: [
+                {
+                  citation_id: 'citation',
+                  index: 1,
+                  source_type: 'INVALID',
+                  source_level: 'INVALID',
+                  published_at: 3,
+                },
+              ],
+            },
+          },
+          {
+            schema_version: '2.0',
+            card_id: 'future-source',
+            card_type: 'SourceCard',
+            payload: { sources: [] },
+          },
+          { card_id: 'status', card_type: 'StatusCard', payload: {} },
+          { card_id: 'unknown', card_type: 'UnknownCard', payload: {} },
+        ],
       },
-      actions: [{ action_id: 'submit-selection', label: '确认周期' }],
-    })[1]
-    const confirmation = planMessage({
-      card_id: 'scope',
-      card_type: 'SelectionCard',
-      payload: {
-        phase: 'CONFIRM_PLAN_SCOPE',
-        question: '确认计划范围',
-        input_mode: 'SINGLE_SELECT',
-        options: [{ id: 'confirm-plan-scope', label: '确认并生成计划' }],
-      },
-      actions: [{ action_id: 'submit-selection', label: '提交' }],
-    })[1]
-
-    expect(period).toMatchObject({
-      kind: 'selection',
-      allowFreeText: true,
-      options: ['4 周'],
     })
-    expect(confirmation).toMatchObject({
-      kind: 'selection',
-      allowFreeText: false,
-      options: ['确认并生成计划'],
-    })
-  })
-
-  it('downgrades unknown and cardinality-invalid plan cards to read-only status', () => {
-    const future = planMessage({
-      schema_version: '2.0',
-      card_id: 'future',
-      card_type: 'PlanCard',
-    })
-    const invalid = planMessage({
-      schema_version: '1.1',
-      card_id: 'invalid',
-      card_type: 'PlanCard',
-      entity_refs: { approval_id: 'approval', approval_version: 1 },
-      payload: { mode: 'BUNDLE_CREATE', plans: [{ title: 'only one' }] },
-    })
-
-    expect(future[1]).toMatchObject({ kind: 'status', title: '当前计划卡版本暂不支持' })
-    expect(invalid[1]).toMatchObject({ kind: 'status', title: '计划草案结构无效' })
-  })
-
-  it('maps a rejected historical 1.0 card without making it pending', () => {
-    const items = planMessage({
-      schema_version: '1.0',
-      card_id: 'legacy',
-      card_type: 'PlanCard',
-      entity_refs: {
-        approval_id: 'approval',
-        approval_version: 3,
-        approval_status: 'REJECTED',
-      },
-      payload: { title: '旧计划', objective_summary: '历史草案', weekly_minutes: 60 },
-    })
-
+    expect(items.map((item) => item.kind)).toEqual(['message', 'source', 'source', 'status'])
     expect(items[1]).toMatchObject({
-      kind: 'plan',
-      schemaVersion: '1.0',
-      status: 'rejected',
-      plans: [{ weeklyMinutes: 60 }],
+      interactive: true,
+      sources: [{ sourceType: 'KNOWLEDGE', sourceLevel: 'GENERAL', publishedAt: null }],
     })
+    expect(items[2]).toMatchObject({ interactive: false, sources: [] })
+  })
+
+  it('covers fallback values and utility projections', () => {
+    expect(mapPlan({ status: 'CANCELLED' })).toMatchObject({
+      title: '公务员备考',
+      statusLabel: '已结束',
+      progressLabel: '0 / 0 项',
+    })
+    expect(mapTask({ status: 'DONE' })).toMatchObject({
+      done: true,
+      planTitle: '公务员备考',
+    })
+    expect(
+      mapAgentDefinition({
+        code: 'CIVIL',
+        name: '考公',
+        icon: '公',
+        description: '说明',
+        availability: 'AVAILABLE',
+        welcome_message: '欢迎',
+        starter_prompts: [],
+      }),
+    ).toMatchObject({ code: 'CIVIL', welcomeMessage: '欢迎' })
+    expect(asObject(null)).toBeNull()
+    expect(asArray([{}, null, 1])).toEqual([{}])
+    expect(stringValue({ value: 1 }, 'value', 'fallback')).toBe('fallback')
+    expect(numberValue({ value: '1' }, 'value', 2)).toBe(2)
+  })
+
+  it('covers terminal error and conversation time branches', () => {
+    expect(runErrorPresentation('PLANNER_MODEL_UNAVAILABLE', true).title).toBe('计划生成超时')
+    expect(runErrorPresentation('PLAN_HASH_INVALID', false).title).toBe('计划草稿校验失败')
+    expect(runErrorPresentation('OTHER', false).title).toBe('回答生成失败')
+    const base = {
+      id: 'conversation',
+      title: '对话',
+      status: 'ARCHIVED' as const,
+      specialist: { code: 'CIVIL', name: '考公', icon: '公' },
+      last_message: { content: '最后消息', created_at: '2026-08-18T00:00:00Z' },
+      active_run: { id: 'failed', status: 'FAILED_RETRYABLE' },
+      created_at: '2026-08-01T00:00:00Z',
+      updated_at: '2026-08-01T00:00:00Z',
+    }
+    expect(mapConversation({ ...base, last_message_at: new Date().toISOString() })).toMatchObject({
+      section: 'today',
+      archived: true,
+      agentCode: 'CIVIL',
+      statusLabel: '待重试',
+    })
+    expect(
+      mapConversation({
+        ...base,
+        last_message_at: new Date(Date.now() - 3 * 86_400_000).toISOString(),
+      }).section,
+    ).toBe('week')
+    expect(
+      mapConversation({
+        ...base,
+        active_run: null,
+        last_message_at: new Date(Date.now() - 10 * 86_400_000).toISOString(),
+      }),
+    ).toMatchObject({ section: 'earlier', statusLabel: '已完成' })
   })
 })

@@ -9,10 +9,12 @@ from sqlalchemy import text
 from ai_butler.api.schemas import (
     TaskExecutionRequest,
 )
-from ai_butler.domain.errors import ButlerError, not_found
+from ai_butler.domain.errors import ButlerError, conflict, not_found
 
 from .context import ButlerContext
 from .shared import (
+    _content_hash,
+    _json,
     _row,
 )
 from .users import UserService
@@ -66,6 +68,7 @@ class PlanningService:
                             "FROM plans p JOIN goals g ON g.id=p.goal_id "
                             "LEFT JOIN plan_revisions r ON r.id=p.current_revision_id "
                             "LEFT JOIN tasks t ON t.plan_id=p.id WHERE p.user_id=:user_id "
+                            "AND p.status<>'DELETED' "
                             "GROUP BY p.id,r.id,g.goal_type ORDER BY p.updated_at DESC"
                         ),
                         {"user_id": user_id},
@@ -92,7 +95,10 @@ class PlanningService:
             rows = (
                 (
                     await connection.execute(
-                        text("SELECT * FROM goals WHERE user_id=:user_id ORDER BY updated_at DESC"),
+                        text(
+                            "SELECT * FROM goals WHERE user_id=:user_id AND status<>'DELETED' "
+                            "ORDER BY updated_at DESC"
+                        ),
                         {"user_id": user_id},
                     )
                 )
@@ -108,8 +114,10 @@ class PlanningService:
                     await connection.execute(
                         text(
                             "SELECT id,plan_id,revision,status,objective_summary,start_date,end_date,weekly_minutes,"
-                            "change_reason,approved_at,created_at FROM plan_revisions "
-                            "WHERE user_id=:user_id AND plan_id=:plan_id ORDER BY revision DESC"
+                            "change_reason,approved_at,created_at FROM plan_revisions r "
+                            "WHERE user_id=:user_id AND plan_id=:plan_id AND EXISTS "
+                            "(SELECT 1 FROM plans p WHERE p.id=r.plan_id AND p.status<>'DELETED') "
+                            "ORDER BY revision DESC"
                         ),
                         {"user_id": user_id, "plan_id": plan_id},
                     )
@@ -119,7 +127,10 @@ class PlanningService:
             )
             if not rows:
                 plan = await connection.execute(
-                    text("SELECT 1 FROM plans WHERE id=:id AND user_id=:user_id"),
+                    text(
+                        "SELECT 1 FROM plans WHERE id=:id AND user_id=:user_id "
+                        "AND status<>'DELETED'"
+                    ),
                     {"id": plan_id, "user_id": user_id},
                 )
                 if plan.first() is None:
@@ -133,7 +144,9 @@ class PlanningService:
             row = _row(
                 await connection.execute(
                     text(
-                        "SELECT * FROM plan_revisions WHERE id=:id AND plan_id=:plan_id AND user_id=:user_id"
+                        "SELECT r.* FROM plan_revisions r JOIN plans p ON p.id=r.plan_id "
+                        "WHERE r.id=:id AND r.plan_id=:plan_id AND r.user_id=:user_id "
+                        "AND p.status<>'DELETED'"
                     ),
                     {"id": revision_id, "plan_id": plan_id, "user_id": user_id},
                 )
@@ -148,7 +161,8 @@ class PlanningService:
                 await connection.execute(
                     text(
                         "SELECT p.*,g.title AS goal_title,g.goal_type,g.target_date,g.status AS goal_status "
-                        "FROM plans p JOIN goals g ON g.id=p.goal_id WHERE p.id=:id AND p.user_id=:user_id"
+                        "FROM plans p JOIN goals g ON g.id=p.goal_id WHERE p.id=:id "
+                        "AND p.user_id=:user_id AND p.status<>'DELETED'"
                     ),
                     {"id": plan_id, "user_id": user_id},
                 )
@@ -189,7 +203,8 @@ class PlanningService:
                     await connection.execute(
                         text(
                             "SELECT t.*,p.title AS plan_title FROM tasks t JOIN plans p ON p.id=t.plan_id "
-                            "WHERE t.user_id=:user_id AND t.scheduled_date BETWEEN :date_from AND :date_to "
+                            "WHERE t.user_id=:user_id AND p.status<>'DELETED' "
+                            "AND t.scheduled_date BETWEEN :date_from AND :date_to "
                             "ORDER BY t.scheduled_date,t.priority,t.created_at"
                         ),
                         {"user_id": user_id, "date_from": date_from, "date_to": date_to},
@@ -206,7 +221,7 @@ class PlanningService:
                 await connection.execute(
                     text(
                         "SELECT t.*,p.title AS plan_title FROM tasks t JOIN plans p ON p.id=t.plan_id "
-                        "WHERE t.id=:id AND t.user_id=:user_id"
+                        "WHERE t.id=:id AND t.user_id=:user_id AND p.status<>'DELETED'"
                     ),
                     {"id": task_id, "user_id": user_id},
                 )
@@ -229,7 +244,10 @@ class PlanningService:
             )
             task = _row(
                 await connection.execute(
-                    text("SELECT * FROM tasks WHERE id=:id AND user_id=:user_id FOR UPDATE"),
+                    text(
+                        "SELECT t.* FROM tasks t JOIN plans p ON p.id=t.plan_id "
+                        "WHERE t.id=:id AND t.user_id=:user_id AND p.status<>'DELETED' FOR UPDATE OF t"
+                    ),
                     {"id": task_id, "user_id": user_id},
                 )
             )
@@ -279,3 +297,107 @@ class PlanningService:
                 },
                 "task": {"id": task_id, "status": new_status},
             }
+
+    async def delete_plan(self, user_id: UUID, plan_id: UUID, idempotency_key: str) -> None:
+        """软删除计划并在同一事务停止任务、提醒与滚动排期。"""
+
+        key_hash = _content_hash({"key": idempotency_key})
+        request_hash = _content_hash({"plan_id": str(plan_id)})
+        async with self.database.transaction() as connection:
+            await connection.execute(
+                text(
+                    "INSERT INTO request_idempotency_keys(id,user_id,scope,key_hash,request_hash) "
+                    "VALUES(:id,:user_id,'PLAN_DELETE',:key_hash,:request_hash) "
+                    "ON CONFLICT(user_id,scope,key_hash) DO NOTHING"
+                ),
+                {
+                    "id": uuid4(),
+                    "user_id": user_id,
+                    "key_hash": key_hash,
+                    "request_hash": request_hash,
+                },
+            )
+            reservation = _row(
+                await connection.execute(
+                    text(
+                        "SELECT id,request_hash,response_data FROM request_idempotency_keys "
+                        "WHERE user_id=:user_id AND scope='PLAN_DELETE' AND key_hash=:key FOR UPDATE"
+                    ),
+                    {"user_id": user_id, "key": key_hash},
+                )
+            )
+            if reservation is None:
+                raise ButlerError("IDEMPOTENCY_RESERVATION_FAILED", "无法锁定删除请求", 500)
+            if reservation["request_hash"] != request_hash:
+                raise conflict("IDEMPOTENCY_KEY_REUSED", "幂等键已用于其他计划")
+            if isinstance(reservation["response_data"], dict):
+                return
+            plan = _row(
+                await connection.execute(
+                    text("SELECT * FROM plans WHERE id=:id AND user_id=:user_id FOR UPDATE"),
+                    {"id": plan_id, "user_id": user_id},
+                )
+            )
+            if plan is None:
+                raise not_found()
+            await connection.execute(
+                text("SELECT id FROM goals WHERE id=:id AND user_id=:user_id FOR UPDATE"),
+                {"id": plan["goal_id"], "user_id": user_id},
+            )
+            await connection.execute(
+                text("SELECT id FROM plan_schedule_watermarks WHERE plan_id=:plan_id FOR UPDATE"),
+                {"plan_id": plan_id},
+            )
+            if plan["status"] != "DELETED":
+                await connection.execute(
+                    text(
+                        "UPDATE plans SET status='DELETED',deleted_at=now(),"
+                        "deleted_reason='USER_REQUESTED',updated_at=now() WHERE id=:id"
+                    ),
+                    {"id": plan_id},
+                )
+                await connection.execute(
+                    text(
+                        "UPDATE tasks SET status='CANCELLED',cancellation_reason='PLAN_DELETED',"
+                        "updated_at=now() WHERE plan_id=:id AND status IN ('TODO','DOING')"
+                    ),
+                    {"id": plan_id},
+                )
+                await connection.execute(
+                    text(
+                        "UPDATE notification_jobs SET status='CANCELLED',updated_at=now() "
+                        "WHERE task_id IN (SELECT id FROM tasks WHERE plan_id=:id) "
+                        "AND status IN ('PENDING','RETRY','RUNNING')"
+                    ),
+                    {"id": plan_id},
+                )
+                await connection.execute(
+                    text("DELETE FROM plan_schedule_watermarks WHERE plan_id=:id"),
+                    {"id": plan_id},
+                )
+                remaining = int(
+                    (
+                        await connection.execute(
+                            text(
+                                "SELECT count(*) FROM plans WHERE goal_id=:goal_id "
+                                "AND status<>'DELETED'"
+                            ),
+                            {"goal_id": plan["goal_id"]},
+                        )
+                    ).scalar_one()
+                )
+                if remaining == 0:
+                    await connection.execute(
+                        text(
+                            "UPDATE goals SET status='DELETED',deleted_at=now(),"
+                            "deleted_reason='LAST_PLAN_DELETED',updated_at=now() WHERE id=:id"
+                        ),
+                        {"id": plan["goal_id"]},
+                    )
+            await connection.execute(
+                text(
+                    "UPDATE request_idempotency_keys SET response_data=CAST(:response AS jsonb),"
+                    "updated_at=now() WHERE id=:id"
+                ),
+                {"response": _json({"plan_id": str(plan_id)}), "id": reservation["id"]},
+            )

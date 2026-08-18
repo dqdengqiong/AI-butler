@@ -17,13 +17,7 @@ import { usePageChat } from '@/composables/usePageChat'
 import { usePageResources } from '@/composables/usePageResources'
 import { useAuthStore } from '@/stores/auth'
 import { useButlerStore, type AssistantSceneTarget } from '@/stores/butler'
-import type {
-  AgentShortcutCode,
-  MainTab,
-  PlanViewModel,
-  SheetName,
-  TaskViewModel,
-} from '@/types/view-models'
+import type { AgentShortcutCode, MainTab, SheetName } from '@/types/view-models'
 
 const auth = useAuthStore()
 const butler = useButlerStore()
@@ -37,6 +31,7 @@ const {
   activeConversationId,
   stagedScene,
   stagedSpecialistCode,
+  activeRunId,
 } = storeToRefs(butler)
 
 const activeTab = ref<MainTab>('chat')
@@ -72,16 +67,7 @@ const {
   sourceTypeLabel,
   updateReminders,
 } = resources
-const {
-  approvePlan,
-  editPlan,
-  editingPlan,
-  rejectPlan,
-  retryRun,
-  selectOption,
-  sendMessage,
-  submitSelection,
-} = usePageChat(token, attachments)
+const { confirmPlan, retryRun, sendMessage } = usePageChat(token, attachments)
 
 const displayName = computed(() => user.value?.nickname || '小邓')
 const appReady = computed(() => loggedIn.value)
@@ -101,52 +87,7 @@ const activeAssistantSubtitle = computed(() => {
   return activeAgent.value ? `${activeAgent.value.name}助理在线` : 'AI 管家在线'
 })
 
-const demoPlans: PlanViewModel[] = [
-  {
-    key: 'demo-plan',
-    icon: '公',
-    title: '公务员备考',
-    subtitle: '距阶段目标还有 18 天',
-    statusLabel: '进行中',
-    progress: 62,
-    progressLabel: '13 / 21 项',
-    tone: 'blue',
-  },
-]
-const demoTasks: TaskViewModel[] = [
-  {
-    key: 'demo-task-1',
-    planKey: 'demo-plan',
-    title: '行测判断推理 30 题',
-    planTitle: '公务员备考',
-    durationMinutes: 45,
-    done: true,
-    status: 'DONE',
-    tone: 'blue',
-  },
-  {
-    key: 'demo-task-2',
-    planKey: 'demo-plan',
-    title: '申论材料阅读与提纲',
-    planTitle: '公务员备考',
-    durationMinutes: 60,
-    done: false,
-    status: 'TODO',
-    tone: 'blue',
-  },
-  {
-    key: 'demo-task-3',
-    planKey: 'demo-plan',
-    title: '复盘本周错题',
-    planTitle: '公务员备考',
-    durationMinutes: 30,
-    done: false,
-    status: 'TODO',
-    tone: 'blue',
-  },
-]
-const visiblePlans = computed(() => (plans.value.length ? plans.value : demoPlans))
-const visibleTasks = computed(() => (tasks.value.length ? tasks.value : demoTasks))
+const deletingPlanId = ref<string | null>(null)
 
 onMounted(async () => {
   if (await auth.restore()) await Promise.all([butler.load(token()), loadPreferences()])
@@ -212,8 +153,7 @@ async function selectAssistant(agentCode: AgentShortcutCode | null): Promise<voi
     activeSheet.value = null
     activeTab.value = 'chat'
     attachments.value = []
-    editingPlan.value = null
-    if (result === 'RESUMABLE') uni.showToast({ title: `已恢复${label}的未完成任务`, icon: 'none' })
+    if (result === 'RESUMABLE') uni.showToast({ title: `已打开${label}的对话`, icon: 'none' })
   } catch (error) {
     uni.showToast({ title: error instanceof Error ? error.message : '切换失败', icon: 'none' })
   }
@@ -264,7 +204,7 @@ function deleteConversation(conversationKey: string): void {
 }
 
 async function completeTask(taskKey: string): Promise<void> {
-  const task = visibleTasks.value.find((item) => item.key === taskKey)
+  const task = tasks.value.find((item) => item.key === taskKey)
   if (!task) return
   if (task.done) {
     uni.showToast({ title: '已完成任务暂不支持撤销', icon: 'none' })
@@ -275,6 +215,27 @@ async function completeTask(taskKey: string): Promise<void> {
     uni.showToast({ title: '完成记录已提交', icon: 'success' })
   } catch (error) {
     uni.showToast({ title: error instanceof Error ? error.message : '提交失败', icon: 'none' })
+  }
+}
+
+async function deletePlan(planKey: string): Promise<void> {
+  if (deletingPlanId.value) return
+  const target = plans.value.find((item) => item.key === planKey)
+  if (!target) return
+  const confirmed = await confirmSwitch(
+    '删除计划？',
+    `“${target.title}”删除后不可恢复；未来任务和提醒会被取消，已完成记录仅供内部审计保留。`,
+    '删除计划',
+  )
+  if (!confirmed) return
+  deletingPlanId.value = planKey
+  try {
+    await butler.deletePlan(planKey, token())
+    uni.showToast({ title: '计划已删除', icon: 'success' })
+  } catch (error) {
+    uni.showToast({ title: error instanceof Error ? error.message : '删除失败', icon: 'none' })
+  } finally {
+    deletingPlanId.value = null
   }
 }
 
@@ -300,10 +261,12 @@ async function requestAdjustment(): Promise<void> {
     <view class="main-view" :class="{ 'chat-main': activeTab === 'chat' }">
       <PlansView
         v-if="activeTab === 'plans'"
-        :plans="visiblePlans"
-        :tasks="visibleTasks"
+        :plans="plans"
+        :tasks="tasks"
+        :deleting-plan-id="deletingPlanId"
         @complete-task="completeTask"
         @request-adjustment="requestAdjustment"
+        @delete-plan="deletePlan"
       />
       <ChatView
         v-else
@@ -312,14 +275,11 @@ async function requestAdjustment(): Promise<void> {
         :user-name="displayName"
         :agent-shortcuts="agentShortcuts"
         :active-agent-code="activeAgentCode"
+        :busy="activeRunId !== null"
         @send="sendMessage"
         @open-attachments="activeSheet = 'attachments'"
         @remove-attachment="removeAttachment"
-        @select-option="selectOption"
-        @submit-selection="submitSelection"
-        @approve-plan="approvePlan"
-        @edit-plan="editPlan"
-        @reject-plan="rejectPlan"
+        @confirm-plan="confirmPlan"
         @open-source="openSource"
         @retry-run="retryRun"
         @select-agent="activateAgent"

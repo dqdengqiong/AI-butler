@@ -154,12 +154,6 @@ class AttachmentInput(BaseModel):
     position: int = Field(ge=0, le=8)
 
 
-class SelectionInput(BaseModel):
-    card_id: UUID
-    action_id: NonEmpty
-    selected_option_ids: list[NonEmpty] = Field(min_length=1, max_length=10)
-
-
 class SendMessageRequest(BaseModel):
     schema_version: Literal["1.0"] = "1.0"
     client_message_id: Annotated[str, StringConstraints(min_length=8, max_length=128)]
@@ -169,18 +163,23 @@ class SendMessageRequest(BaseModel):
     execution_policy: Literal["REJECT", "CANCEL_OTHER"] = "REJECT"
     content: Annotated[str, StringConstraints(max_length=20_000)] = ""
     attachments: list[AttachmentInput] = Field(default_factory=list, max_length=9)
-    selection: SelectionInput | None = None
 
     @model_validator(mode="after")
     def require_content(self) -> SendMessageRequest:
-        if not self.content.strip() and not self.attachments and self.selection is None:
-            raise ValueError("content, attachments or selection is required")
+        if not self.content.strip() and not self.attachments:
+            raise ValueError("content or attachments is required")
         return self
+
+
+class PlanPreviewConfirmationRequestV1(BaseModel):
+    schema_version: Literal["1.0"] = "1.0"
+    expected_preview_hash: Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
 
 
 class AgentStarterPromptResponse(BaseModel):
     label: str
     content: str
+    behavior: Literal["SEND_MESSAGE", "FILL_COMPOSER"] = "FILL_COMPOSER"
 
 
 class AgentDefinitionResponse(BaseModel):
@@ -231,47 +230,56 @@ class ConversationListResponse(BaseModel):
     has_more: bool
 
 
-class PlanCardPlanV11(BaseModel):
-    work_item_id: str
-    plan_id: UUID
-    plan_revision_id: UUID
+class PlanPreviewTaskV1(BaseModel):
+    task_key: str
+    title: str
+    scheduled_date: date
+    expected_minutes: int = Field(gt=0)
+    priority: int = Field(ge=1, le=5)
+
+
+class PlanPreviewPlanV1(BaseModel):
     title: str
     objective_summary: str
     weekly_minutes: int = Field(gt=0)
-    start_date: date | None = None
-    end_date: date | None = None
+    start_date: date
+    end_date: date
+    stages: list[dict[str, object]] = Field(default_factory=list)
+    tasks: list[PlanPreviewTaskV1] = Field(default_factory=list)
 
 
-class PlanCardPayloadV11(BaseModel):
-    mode: Literal["SINGLE_PLAN_CREATE", "SINGLE_PLAN_ADJUST", "BUNDLE_CREATE"]
+class PlanPreviewCardPayloadV1(BaseModel):
+    status: Literal["READY", "CONFIRMED", "SUPERSEDED", "DISMISSED", "EXPIRED"]
+    operation: Literal["CREATE", "ADJUST"]
     title: str
-    plans: list[PlanCardPlanV11]
+    plan: PlanPreviewPlanV1
     total_weekly_minutes: int = Field(gt=0)
     available_weekly_minutes: int = Field(gt=0)
+    preview_hash: Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
+    generated_at: datetime
+    expires_at: datetime
+    target_plan_id: UUID | None = None
+    expected_current_revision_id: UUID | None = None
+    availability: dict[str, object]
+    scenario_code: str
+    scenario_fields: dict[str, str]
+    evidence: list[dict[str, object]] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
 
-    @model_validator(mode="after")
-    def validate_mode_cardinality(self) -> PlanCardPayloadV11:
-        if self.mode == "BUNDLE_CREATE" and len(self.plans) < 2:
-            raise ValueError("BUNDLE_CREATE requires at least two plans")
-        if self.mode == "SINGLE_PLAN_ADJUST" and len(self.plans) != 1:
-            raise ValueError("SINGLE_PLAN_ADJUST requires exactly one plan")
-        return self
 
+class PlanPreviewCardV1(BaseModel):
+    """确认前只存在于聊天消息中的计划预览，不引用未落库业务实体。"""
 
-class PlanCardV11(BaseModel):
-    """新输出计划卡；MessageResponse 仍允许历史 1.0 与未知卡片只读透传。"""
-
-    schema_version: Literal["1.1"]
+    schema_version: Literal["1.0"]
     card_id: UUID
-    card_type: Literal["PlanCard"]
-    entity_refs: dict[str, object]
-    payload: PlanCardPayloadV11
+    card_type: Literal["PlanPreviewCard"]
+    entity_refs: dict[str, object] = Field(default_factory=dict)
+    payload: PlanPreviewCardPayloadV1
     actions: list[dict[str, object]]
 
 
 class CardCollection(BaseModel):
-    cards: list[PlanCardV11 | dict[str, object]] = Field(default_factory=list)
+    cards: list[PlanPreviewCardV1 | dict[str, object]] = Field(default_factory=list)
 
 
 class MessageResponse(BaseModel):
@@ -298,7 +306,7 @@ class AcceptedMessageResponse(BaseModel):
 class AcceptedRunResponse(BaseModel):
     id: UUID
     status: str
-    execution_mode: Literal["START", "INPUT_RESUME"]
+    execution_mode: Literal["START"]
     attempt: int
 
 
@@ -330,19 +338,13 @@ class RetryRunRequest(BaseModel):
     execution_policy: Literal["REJECT", "CANCEL_OTHER"] = "REJECT"
 
 
-class ApprovalDecisionRequest(BaseModel):
+class PlanConfirmationResponseV1(BaseModel):
     schema_version: Literal["1.0"] = "1.0"
-    approval_id: UUID
-    expected_approval_version: int = Field(ge=1)
-    action: Literal["APPROVE", "EDIT", "REJECT"]
-    feedback: Annotated[str | None, StringConstraints(max_length=4000)] = None
-    execution_policy: Literal["REJECT", "CANCEL_OTHER"] = "REJECT"
-
-    @model_validator(mode="after")
-    def require_edit_feedback(self) -> ApprovalDecisionRequest:
-        if self.action == "EDIT" and not (self.feedback or "").strip():
-            raise ValueError("feedback is required for EDIT")
-        return self
+    preview_message_id: UUID
+    plan_id: UUID
+    revision_id: UUID
+    task_ids: list[UUID]
+    status: Literal["CONFIRMED"] = "CONFIRMED"
 
 
 class TaskExecutionRequest(BaseModel):

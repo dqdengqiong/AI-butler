@@ -21,7 +21,6 @@ from .context import ButlerContext
 from .conversation_repository import ConversationRepository
 from .shared import (
     NON_TERMINAL_RUN_SQL,
-    SUSPENDED_RUN_SQL,
     _row,
 )
 
@@ -49,7 +48,6 @@ class RoutingService:
             request.context_policy != "AUTO"
             or request.target_conversation_id is not None
             or request.specialist_code is not None
-            or request.selection is not None
             or not request.content.strip()
         ):
             return None
@@ -142,26 +140,6 @@ class RoutingService:
             assert specialist is not None
             if current.get("specialist_user_agent_id") == specialist["user_agent_id"]:
                 return current, {"kind": "CONTINUED", "archived_conversation_id": None}
-            suspended = _row(
-                await connection.execute(
-                    text(
-                        f"SELECT c.* FROM conversations c JOIN agent_runs r "  # noqa: S608
-                        "ON r.conversation_id=c.id WHERE c.user_id=:user_id "
-                        "AND c.specialist_user_agent_id=:specialist AND c.deleted_at IS NULL "
-                        f"AND r.status IN ({SUSPENDED_RUN_SQL}) "
-                        "ORDER BY COALESCE(c.last_message_at,c.created_at) DESC LIMIT 1 FOR UPDATE OF c"
-                    ),
-                    {"user_id": user_id, "specialist": specialist["user_agent_id"]},
-                )
-            )
-            if suspended is not None:
-                archived = await self._activate_conversation(
-                    connection, current, suspended, now, "SPECIALIST_SWITCH"
-                )
-                return suspended, {
-                    "kind": "RESUMED",
-                    "archived_conversation_id": archived,
-                }
             await self._reserve_execution_slot(connection, user_id, None, "CANCEL_OTHER")
             archived = await self._archive_or_discard_current(
                 connection, current, now, "SPECIALIST_SWITCH"

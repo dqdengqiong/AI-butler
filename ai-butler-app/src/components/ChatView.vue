@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 
 import ChatComposer from '@/components/chat/ChatComposer.vue'
 import ChatThread from '@/components/chat/ChatThread.vue'
@@ -11,7 +11,7 @@ import type {
   UploadedAttachment,
 } from '@/types/view-models'
 
-type PlanChatItem = Extract<ChatItem, { kind: 'plan' }>
+type PlanChatItem = Extract<ChatItem, { kind: 'planPreview' }>
 type StatusChatItem = Extract<ChatItem, { kind: 'status' }>
 
 const props = defineProps<{
@@ -20,17 +20,14 @@ const props = defineProps<{
   userName: string
   agentShortcuts: AgentShortcutViewModel[]
   activeAgentCode?: AgentShortcutCode
+  busy?: boolean
 }>()
 
 const emit = defineEmits<{
   send: [content: string]
   openAttachments: []
   removeAttachment: [fileId: string]
-  selectOption: [itemKey: string, optionIndex: number]
-  submitSelection: [itemKey: string]
-  approvePlan: [item: PlanChatItem]
-  editPlan: [item: PlanChatItem]
-  rejectPlan: [item: PlanChatItem]
+  confirmPlan: [item: PlanChatItem]
   openSource: [citationId: string]
   selectAgent: [agentCode: AgentShortcutCode]
   retryRun: [item: StatusChatItem]
@@ -42,6 +39,11 @@ const isFreshConversation = computed(
 const activeAgent = computed(() =>
   props.agentShortcuts.find((agent) => agent.code === props.activeAgentCode),
 )
+const composer = ref<InstanceType<typeof ChatComposer> | null>(null)
+
+function editPreview(): void {
+  composer.value?.prefill('我想调整这份预览：')
+}
 </script>
 
 <template>
@@ -59,19 +61,18 @@ const activeAgent = computed(() =>
       <ChatThread
         :items="items"
         :fresh="isFreshConversation"
-        @select-option="(key, index) => emit('selectOption', key, index)"
-        @submit-selection="(key) => emit('submitSelection', key)"
-        @approve-plan="(item) => emit('approvePlan', item)"
-        @edit-plan="(item) => emit('editPlan', item)"
-        @reject-plan="(item) => emit('rejectPlan', item)"
+        @edit-plan="editPreview"
+        @confirm-plan="(item) => emit('confirmPlan', item)"
         @open-source="(citationId) => emit('openSource', citationId)"
         @retry-run="(item) => emit('retryRun', item)"
       />
     </scroll-view>
     <ChatComposer
+      ref="composer"
       :items="items"
       :attachments="attachments"
       :active-agent="activeAgent"
+      :busy="busy"
       @send="(content) => emit('send', content)"
       @open-attachments="emit('openAttachments')"
       @remove-attachment="(fileId) => emit('removeAttachment', fileId)"

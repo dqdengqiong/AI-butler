@@ -63,7 +63,7 @@ const emit = defineEmits<{
         <view class="menu-icon orange">史</view>
         <view class="menu-copy">
           <text class="menu-title">计划版本</text>
-          <text class="menu-subtitle">查看计划调整与审批历史</text>
+          <text class="menu-subtitle">查看计划调整与确认历史</text>
         </view>
         <text class="menu-arrow">›</text>
       </button>

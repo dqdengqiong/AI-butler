@@ -67,7 +67,6 @@ export function connectRunStream(options: StreamOptions): { close(): void } {
       'message.delta',
       'message.reset',
       'message.completed',
-      'interrupt',
       'run.completed',
       'run.cancelled',
       'error',

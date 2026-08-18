@@ -50,16 +50,9 @@ def _passing_outcome(task: AgentEvalTaskV1) -> AgentEvalOutcomeV1:
 
 def test_dataset_contains_versioned_priority_scenarios() -> None:
     dataset = load_eval_dataset()
-    assert len(dataset.tasks) == 24
-    assert dataset.dataset_version == "2026-08-11.1"
-    assert {task.task_id for task in select_tasks(dataset, EvalSuite.SECURITY)} == {
-        "R-04",
-        "A-06",
-        "S-01",
-        "S-02",
-        "S-03",
-        "S-04",
-    }
+    assert len(dataset.tasks) == 10
+    assert dataset.dataset_version == "2026-08-18.1"
+    assert {task.task_id for task in select_tasks(dataset, EvalSuite.SECURITY)} == {"P-05", "S-01"}
 
 
 def test_dataset_rejects_duplicate_task_ids(tmp_path: Path) -> None:
@@ -98,11 +91,11 @@ def test_deepeval_adapter_preserves_project_contract() -> None:
         "schema_version": "1.0",
         "task_id": "R-01",
         "priority": "P0",
-        "suites": ["core", "live"],
+        "suites": ["smoke", "core"],
     }
-    assert len(deepeval_dataset.goldens) == 24
+    assert len(deepeval_dataset.goldens) == 10
     assert test_case.tools_called is not None
-    assert test_case.tools_called[0].name == "research_collect_evidence"
+    assert test_case.tools_called[0].name == "search_public_knowledge"
     assert test_case.metadata == {"task_id": "R-01", "synthetic_data": True}
 
 

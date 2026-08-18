@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from datetime import UTC, date, datetime, time
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
 import pytest
@@ -8,11 +11,9 @@ from pydantic import ValidationError
 
 from ai_butler.agent.availability import AvailabilityInterpretationV1, AvailabilityWindowV1
 from ai_butler.api.schemas import (
-    ApprovalDecisionRequest,
     AttachmentInput,
     AvailabilityRequest,
     AvailabilityWindow,
-    SelectionInput,
     SendMessageRequest,
 )
 from ai_butler.application.butler import (
@@ -21,6 +22,7 @@ from ai_butler.application.butler import (
     _encode_cursor,
     _message_request_hash,
 )
+from ai_butler.application.butler.completion import CompletionService
 from ai_butler.config import Settings
 from ai_butler.domain.errors import ButlerError
 
@@ -45,7 +47,7 @@ def test_security_settings_reject_unsafe_values(override: dict[str, object]) -> 
         Settings(**override)  # type: ignore[arg-type]
 
 
-def test_request_schema_rejects_incomplete_ranges_and_edit() -> None:
+def test_request_schema_rejects_incomplete_ranges() -> None:
     today = date(2026, 8, 16)
     with pytest.raises(ValidationError, match="provided together"):
         AvailabilityWindow(
@@ -69,13 +71,6 @@ def test_request_schema_rejects_incomplete_ranges_and_edit() -> None:
             effective_from=today,
             effective_to=date(2026, 8, 15),
         )
-    with pytest.raises(ValidationError, match="feedback is required"):
-        ApprovalDecisionRequest(
-            approval_id=uuid4(),
-            expected_approval_version=1,
-            action="EDIT",
-            feedback=" ",
-        )
 
 
 def test_cursor_round_trip_and_rejects_malformed_shapes() -> None:
@@ -95,7 +90,6 @@ def test_cursor_round_trip_and_rejects_malformed_shapes() -> None:
 def test_message_hash_is_canonical_for_content_and_attachment_order() -> None:
     first_file = uuid4()
     second_file = uuid4()
-    card_id = uuid4()
     first = SendMessageRequest(
         client_message_id="message-one",
         content=" 继续计划 ",
@@ -103,11 +97,6 @@ def test_message_hash_is_canonical_for_content_and_attachment_order() -> None:
             AttachmentInput(file_id=second_file, position=2),
             AttachmentInput(file_id=first_file, position=1),
         ],
-        selection=SelectionInput(
-            card_id=card_id,
-            action_id="confirm",
-            selected_option_ids=["morning"],
-        ),
     )
     reordered = first.model_copy(
         update={
@@ -135,7 +124,7 @@ def test_conversation_projection_includes_specialist_run_and_preview() -> None:
             "specialist_name": "考公助理",
             "specialist_metadata": {"icon": "exam"},
             "active_run_id": run_id,
-            "active_run_status": "AWAITING_INPUT",
+            "active_run_status": "RUNNING",
             "last_message_content": "这是一段会被限制长度的消息" * 20,
             "last_message_created_at": now,
             "last_message_at": now,
@@ -149,7 +138,7 @@ def test_conversation_projection_includes_specialist_run_and_preview() -> None:
         "name": "考公助理",
         "icon": "exam",
     }
-    assert projected["active_run"] == {"id": run_id, "status": "AWAITING_INPUT"}
+    assert projected["active_run"] == {"id": run_id, "status": "RUNNING"}
     assert len(projected["last_message"]["content"]) == 120  # type: ignore[index]
     assert ButlerService._specialist_response(None) is None
     assert ButlerService._specialist_response(
@@ -192,6 +181,94 @@ def test_provider_factories_summaries_and_draft_scheduling() -> None:
         excluded_days=(1, 2, 3, 4, 5, 6, 7),
     )
     assert ButlerService._draft_tasks_for_availability(date(2026, 8, 16), no_days) == []
+
+
+@pytest.mark.asyncio
+async def test_context_budget_archives_a_full_segment_deterministically() -> None:
+    """达到硬上限时生成交接摘要并切换 segment，覆盖完整收口路径。"""
+
+    service = object.__new__(CompletionService)
+    service.settings = SimpleNamespace(
+        context_window_tokens=1000,
+        context_soft_limit_ratio=0.2,
+        context_hard_limit_ratio=0.4,
+    )
+    connection = AsyncMock()
+    contents_result = MagicMock()
+    contents_result.scalars.return_value.all.return_value = ["学习记录" * 1000]
+    conversation_result = MagicMock()
+    conversation_id = uuid4()
+    segment_id = uuid4()
+    conversation_result.mappings.return_value.first.return_value = {
+        "id": conversation_id,
+        "active_segment_id": segment_id,
+        "context_version": 2,
+    }
+    summary_id = uuid4()
+    summary_result = MagicMock()
+    summary_result.scalar_one.return_value = summary_id
+    connection.execute.side_effect = [
+        contents_result,
+        MagicMock(),
+        MagicMock(),
+        conversation_result,
+        MagicMock(),
+        summary_result,
+        MagicMock(),
+        MagicMock(),
+        MagicMock(),
+        MagicMock(),
+        MagicMock(),
+    ]
+    run_id = uuid4()
+    await service._maybe_archive_segment(
+        connection,
+        {
+            "id": run_id,
+            "user_id": uuid4(),
+            "conversation_id": conversation_id,
+            "segment_id": segment_id,
+            "pending_response_message_id": uuid4(),
+        },
+    )
+
+    assert connection.execute.await_count == 11
+    statements = [str(call.args[0]) for call in connection.execute.await_args_list]
+    assert any("CUMULATIVE_HANDOFF" in statement for statement in statements)
+    assert any("status='ARCHIVED'" in statement for statement in statements)
+
+
+@pytest.mark.asyncio
+async def test_failed_run_persists_terminal_state_and_public_error_event() -> None:
+    service = object.__new__(CompletionService)
+    connection = AsyncMock()
+    run_id = uuid4()
+    run_result = MagicMock()
+    run_result.mappings.return_value.first.return_value = {
+        "id": run_id,
+        "user_id": uuid4(),
+        "status": "RUNNING",
+        "attempt": 2,
+        "pending_response_message_id": uuid4(),
+    }
+    connection.execute.side_effect = [run_result, MagicMock(), MagicMock()]
+
+    @asynccontextmanager
+    async def transaction():
+        yield connection
+
+    service.database = SimpleNamespace(transaction=transaction)
+    service._append_event = AsyncMock()
+    error = ButlerError("TEMPORARY_FAILURE", "暂时失败", 503, True)
+    await service._fail_run(run_id, error)
+
+    statements = [str(call.args[0]) for call in connection.execute.await_args_list]
+    assert any(
+        "FAILED_RETRYABLE" not in statement and "status=:status" in statement
+        for statement in statements
+    )
+    assert service._append_event.await_args.args[3] == "error"
+    assert service._append_event.await_args.args[4]["code"] == "TEMPORARY_FAILURE"
 
 
 def test_availability_overlap_validation() -> None:
