@@ -9,6 +9,7 @@ from uuid import UUID
 
 from sqlalchemy import text
 
+from ai_butler.adapters.model_routing import load_model_routing
 from ai_butler.adapters.vector import QdrantVectorStore
 from ai_butler.config import get_settings
 from ai_butler.infrastructure.database import AsyncDatabase
@@ -27,9 +28,12 @@ async def reset_users(confirm: bool) -> int:
     if settings.object_storage_backend != "local":
         raise SystemExit("user reset currently supports local object storage only")
     database = AsyncDatabase(settings.migration_database_url)
-    vector_store = QdrantVectorStore(
-        settings.qdrant_url, settings.qdrant_collection, settings.embedding_dimensions
+    dimensions = (
+        load_model_routing(settings.model_routing_file, settings.app_env).embedding.dimensions
+        if settings.model_routing_enabled
+        else 8
     )
+    vector_store = QdrantVectorStore(settings.qdrant_url, settings.qdrant_collection, dimensions)
     try:
         async with database.connect() as connection:
             documents = (

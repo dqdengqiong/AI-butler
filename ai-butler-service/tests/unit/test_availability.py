@@ -10,7 +10,6 @@ from ai_butler.adapters.llm import (
     ModelRequest,
     ModelResponse,
     ModelServerError,
-    OpenAICompatibleLLM,
 )
 from ai_butler.agent.availability import (
     AvailabilityInterpretationV1,
@@ -19,12 +18,18 @@ from ai_butler.agent.availability import (
     quick_availability_options,
 )
 from ai_butler.application.butler import ButlerService
-from ai_butler.config import Settings
 
 
 class InvalidLLM:
     async def generate(self, request: ModelRequest) -> ModelResponse:
-        return ModelResponse("invalid", "not-json", request.prompt_version)
+        return ModelResponse(
+            provider="test",
+            model="invalid",
+            model_profile="invalid",
+            content="not-json",
+            prompt_version=request.prompt_version,
+            attempt=request.attempt_offset + 1,
+        )
 
 
 class FailingLLM:
@@ -177,9 +182,9 @@ def test_invalid_time_window_is_rejected(window: dict[str, object]) -> None:
 
 
 @pytest.mark.asyncio
-async def test_model_failure_falls_back_to_clarification() -> None:
-    result = await AvailabilityInterpreter(FailingLLM()).interpret("每天一小时")
-    assert result.status == "NEEDS_CLARIFICATION"
+async def test_model_infrastructure_failure_propagates_for_worker_retry() -> None:
+    with pytest.raises(ModelServerError):
+        await AvailabilityInterpreter(FailingLLM()).interpret("每天一小时")
 
 
 def test_normalizer_rejects_invalid_days_duplicate_defaults_and_empty_input() -> None:
@@ -202,19 +207,6 @@ def test_normalizer_rejects_invalid_days_duplicate_defaults_and_empty_input() ->
 
     assert invalid_day.status == duplicate.status == empty.status == "NEEDS_CLARIFICATION"
     assert model_question.question == "请说明每周总时长，或具体哪些天可以学习。"
-
-
-def test_llm_builder_fails_closed_for_unknown_provider() -> None:
-    real = ButlerService._build_llm(
-        Settings(
-            llm_provider="openai-compatible",
-            llm_api_key="test-key",  # pragma: allowlist secret
-            chat_model="test-model",
-        )
-    )
-    assert isinstance(real, OpenAICompatibleLLM)
-    with pytest.raises(ValueError, match="unsupported llm provider"):
-        ButlerService._build_llm(Settings(llm_provider="unknown"))
 
 
 def test_summary_lists_custom_excluded_days() -> None:

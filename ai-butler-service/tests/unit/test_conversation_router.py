@@ -49,7 +49,14 @@ class _LLM:
     async def generate(self, request: ModelRequest) -> ModelResponse:
         if self.fails:
             raise RuntimeError("upstream included private input")
-        return ModelResponse("test", self.content or "", request.prompt_version)
+        return ModelResponse(
+            provider="test",
+            model="test",
+            model_profile="test",
+            content=self.content or "",
+            prompt_version=request.prompt_version,
+            attempt=request.attempt_offset + 1,
+        )
 
 
 async def test_llm_router_parses_safe_decision_and_fails_safe() -> None:

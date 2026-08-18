@@ -50,7 +50,10 @@ services:
       SEARCH_MAX_QUERIES: ${SEARCH_MAX_QUERIES:-3}
       SEARCH_MAX_RESULTS: ${SEARCH_MAX_RESULTS:-5}
       OFFICIAL_SOURCE_DOMAINS: '${OFFICIAL_SOURCE_DOMAINS:-[]}'
-      EMBEDDING_DIMENSIONS: 8
+      MODEL_ROUTING_ENABLED: ${MODEL_ROUTING_ENABLED:-false}
+      MODEL_SHADOW_MODE: ${MODEL_SHADOW_MODE:-false}
+      MODEL_ROUTING_FILE: /app/model-routing.toml
+      MODEL_API_KEYS: '${MODEL_API_KEYS:-{}}'
       OBJECT_STORAGE_LOCAL_PATH: /app/local-storage
       PUBLIC_BASE_URL: http://127.0.0.1:8000
       AUTH_ACCESS_TOKEN_SECRET: local-compose-access-secret-change-before-sharing # pragma: allowlist secret

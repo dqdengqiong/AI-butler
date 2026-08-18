@@ -117,6 +117,20 @@ pnpm dev:h5
 
 客户端不提供手动新建会话，所有消息通过 `POST /v1/messages` 提交。`CONVERSATION_TOPIC_IDLE_SECONDS` 默认 `86400`，用于提高长时间无活动后的新话题倾向；`CONVERSATION_TOPIC_CONFIDENCE` 默认 `0.85`，低于阈值或语义模糊时要求用户确认。路由器不可用时延续当前话题，专业助理切换和历史续聊仍按确定性规则处理。
 
+## 模型路由配置
+
+本地开发和普通测试默认 `MODEL_ROUTING_ENABLED=false`，只使用确定性 Fake。真实调用由 `model-routing.toml` 固定路由：纯文本节点使用千问主、豆包备，多模态节点使用豆包主、千问备；只在超时、连接失败、429 或 5xx 时切换。运行时不按价格、延迟或模型自评选模。
+
+启用真实模型时，在未提交到版本库的 `.env.local` 中设置：
+
+```dotenv
+MODEL_ROUTING_ENABLED=true
+MODEL_ROUTING_FILE=./model-routing.toml
+MODEL_API_KEYS={"qwen":"replace-me","doubao":"replace-me"}
+```
+
+`MODEL_SHADOW_MODE=true` 仅用于显式评测：主模型成功后还会调用备用模型并只记录调用元数据，不影响正式输出。生产与 staging 启动时，每条路由必须恰好有一个跨供应商备用；非生产配置可以使用 `fallbacks=[]`。配置不接受价格、`price_as_of` 或其他未定义字段。调用审计不保存 Prompt、用户原文、文件正文、工具原始输出、思维链或密钥。
+
 ## 常用命令
 
 - `make doctor`：检查 Python、uv、Docker、Compose、端口和配置。
@@ -134,9 +148,9 @@ pnpm dev:h5
 - `make openapi`：重新生成 `openapi.json`。
 - `make eval-smoke`：运行本地合成数据的 DeepEval 快速门禁。
 - `make eval`：运行完整的确定性 Agent 合约与安全评测。
-- `make eval-live`：使用配置的真实 Agent Runner 执行每题三次评测并保存报告。
+- `make eval-live`：使用千问与豆包两个真实 Agent Runner 分别执行每题三次评测并保存报告。
 - `make ci`：运行格式检查、lint、类型、测试、文档链接和密钥检查。
 
-Agent 评测只使用本地合成数据。DeepEval 的 dotenv 自动加载、遥测和云端报告在命令中均被禁用；`make eval-live` 还要求通过 `EVAL_RUNNER_FACTORY=module.path:factory` 显式提供真实 Agent Runner，避免把合约自测误报为模型质量基线。
+Agent 评测只使用本地合成数据。DeepEval 的 dotenv 自动加载、遥测和云端报告在命令中均被禁用；`make eval-live` 还要求通过 `EVAL_RUNNER_FACTORIES={"qwen_balanced":"module.path:qwen_factory","doubao_turbo":"module.path:doubao_factory"}` 显式提供两个真实 Agent Runner。命令会输出独立报告，避免把合约自测误报为模型质量基线。
 
 规范与架构入口见 [docs/README.md](docs/README.md)。

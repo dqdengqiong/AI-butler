@@ -5,10 +5,11 @@ from __future__ import annotations
 import json
 from datetime import time
 from typing import Literal
+from uuid import UUID
 
 from pydantic import BaseModel, Field, ValidationError, model_validator
 
-from ai_butler.adapters.llm import LLM, ModelError, ModelRequest
+from ai_butler.adapters.llm import LLM, ModelRequest, ModelResponse, ModelTask
 
 DAY_LABELS = {1: "周一", 2: "周二", 3: "周三", 4: "周四", 5: "周五", 6: "周六", 7: "周日"}
 
@@ -57,26 +58,50 @@ class AvailabilityInterpreter:
     def __init__(self, llm: LLM) -> None:
         self._llm = llm
 
-    async def interpret(self, user_input: str) -> AvailabilityInterpretationV1:
+    async def interpret(
+        self, user_input: str, *, run_id: UUID | None = None
+    ) -> AvailabilityInterpretationV1:
         prompt = self._prompt(user_input)
-        raw = await self._generate("availability-v1", prompt)
-        parsed = self._parse(raw)
+        response = await self._generate("availability-v1", prompt, run_id=run_id)
+        parsed = self._parse(response.content)
         if parsed is None:
             repair_prompt = (
-                f"以下输出不符合要求：{raw[:2000]}\n"
+                f"以下输出不符合要求：{response.content[:2000]}\n"
                 "请只返回符合原 Schema 的 JSON，不要解释。\n"
                 f"{prompt}"
             )
-            parsed = self._parse(await self._generate("availability-v1-repair", repair_prompt))
+            repaired = await self._generate(
+                "availability-v1-repair",
+                repair_prompt,
+                model_profile=response.model_profile,
+                attempt_offset=response.attempt,
+                run_id=run_id,
+            )
+            parsed = self._parse(repaired.content)
         if parsed is None:
             return self._clarification("我没能准确理解这段时间安排，请换一种具体说法。")
         return self.normalize(parsed)
 
-    async def _generate(self, prompt_version: str, prompt: str) -> str:
-        try:
-            return (await self._llm.generate(ModelRequest(prompt_version, prompt))).content
-        except ModelError:
-            return ""
+    async def _generate(
+        self,
+        prompt_version: str,
+        prompt: str,
+        *,
+        model_profile: str | None = None,
+        attempt_offset: int = 0,
+        run_id: UUID | None = None,
+    ) -> ModelResponse:
+        return await self._llm.generate(
+            ModelRequest.user(
+                ModelTask.AVAILABILITY,
+                prompt_version,
+                prompt,
+                schema_version="1.0",
+                model_profile=model_profile,
+                attempt_offset=attempt_offset,
+                run_id=run_id,
+            )
+        )
 
     @staticmethod
     def _parse(content: str) -> AvailabilityInterpretationV1 | None:

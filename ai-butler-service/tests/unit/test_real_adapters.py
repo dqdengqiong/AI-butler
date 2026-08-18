@@ -11,9 +11,11 @@ from ai_butler.adapters.embedding import OpenAICompatibleEmbeddingProvider
 from ai_butler.adapters.llm import (
     ModelRequest,
     ModelServerError,
+    ModelTask,
     ModelTimeoutError,
     OpenAICompatibleLLM,
 )
+from ai_butler.adapters.model_routing import ChatModelProfile, ModelProtocol
 
 
 class _WechatClient:
@@ -91,28 +93,85 @@ class _OpenAIClient:
             if error:
                 raise error
             return SimpleNamespace(
-                choices=[SimpleNamespace(message=SimpleNamespace(content=content))]
+                choices=[SimpleNamespace(message=SimpleNamespace(content=content))],
+                usage=SimpleNamespace(
+                    prompt_tokens=11,
+                    completion_tokens=7,
+                    prompt_tokens_details=SimpleNamespace(cached_tokens=3),
+                ),
             )
 
         async def create_embedding(**_kwargs: object) -> object:
             return SimpleNamespace(data=[SimpleNamespace(embedding=[0.1, 0.2])])
 
+        async def create_response(**_kwargs: object) -> object:
+            if error:
+                raise error
+            return SimpleNamespace(
+                output_text=content,
+                usage=SimpleNamespace(
+                    input_tokens=13,
+                    output_tokens=8,
+                    input_tokens_details=SimpleNamespace(cached_tokens=4),
+                ),
+                incomplete_details=None,
+            )
+
         self.chat = SimpleNamespace(completions=SimpleNamespace(create=create_chat))
+        self.responses = SimpleNamespace(create=create_response)
         self.embeddings = SimpleNamespace(create=create_embedding)
+
+
+def _profile(
+    model: str = "model",
+    *,
+    provider: str = "qwen",
+    protocol: ModelProtocol = ModelProtocol.OPENAI_CHAT,
+) -> ChatModelProfile:
+    return ChatModelProfile(
+        provider=provider,
+        model=model,
+        protocol=protocol,
+        structured_output=True,
+        multimodal=True,
+        tools=True,
+        context_window_tokens=100_000,
+    )
 
 
 async def test_openai_compatible_chat_and_embedding(monkeypatch: pytest.MonkeyPatch) -> None:
     client = _OpenAIClient()
-    monkeypatch.setattr(openai, "AsyncOpenAI", lambda **_kwargs: client)
-    llm = OpenAICompatibleLLM("key", "https://provider", "model")
-    response = await llm.generate(ModelRequest(prompt_version="v1", user_input="input"))
+    client_options: list[dict[str, object]] = []
+
+    def client_factory(**kwargs: object) -> _OpenAIClient:
+        client_options.append(kwargs)
+        return client
+
+    monkeypatch.setattr(openai, "AsyncOpenAI", client_factory)
+    llm = OpenAICompatibleLLM("key", "https://provider", "profile", _profile())
+    response = await llm.generate(ModelRequest.user(ModelTask.AVAILABILITY, "v1", "input"))
     assert response.content == '{"ok":true}'
-    embedding = OpenAICompatibleEmbeddingProvider("key", "https://provider", "embed")
+    assert response.input_tokens == 11
+    assert response.cached_input_tokens == 3
+    embedding = OpenAICompatibleEmbeddingProvider("key", "https://provider", "embed", 2)
     assert await embedding.embed("input") == [0.1, 0.2]
+    assert [options["max_retries"] for options in client_options] == [0, 0]
+
+    doubao = OpenAICompatibleLLM(
+        "key",
+        "https://provider",
+        "doubao",
+        _profile(provider="doubao", protocol=ModelProtocol.OPENAI_RESPONSES),
+    )
+    responses_result = await doubao.generate(
+        ModelRequest.user(ModelTask.AVAILABILITY, "v1", "input")
+    )
+    assert responses_result.content == '{"ok":true}'
+    assert responses_result.cached_input_tokens == 4
     with pytest.raises(ValueError, match="credentials"):
-        OpenAICompatibleLLM("", "", "")
+        OpenAICompatibleLLM("", "", "profile", _profile())
     with pytest.raises(ValueError, match="credentials"):
-        OpenAICompatibleEmbeddingProvider("", "", "")
+        OpenAICompatibleEmbeddingProvider("", "", "", 2)
 
 
 @pytest.mark.parametrize(
@@ -124,14 +183,14 @@ async def test_openai_compatible_sanitizes_provider_errors(
 ) -> None:
     monkeypatch.setattr(openai, "AsyncOpenAI", lambda **_kwargs: _OpenAIClient(error=error))
     with pytest.raises(expected):
-        await OpenAICompatibleLLM("key", "", "model").generate(
-            ModelRequest(prompt_version="v1", user_input="secret")
+        await OpenAICompatibleLLM("key", "https://provider", "profile", _profile()).generate(
+            ModelRequest.user(ModelTask.AVAILABILITY, "v1", "secret")
         )
 
 
 async def test_openai_compatible_rejects_empty_content(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(openai, "AsyncOpenAI", lambda **_kwargs: _OpenAIClient(content=None))
     with pytest.raises(ModelServerError, match="empty"):
-        await OpenAICompatibleLLM("key", "", "model").generate(
-            ModelRequest(prompt_version="v1", user_input="input")
+        await OpenAICompatibleLLM("key", "https://provider", "profile", _profile()).generate(
+            ModelRequest.user(ModelTask.AVAILABILITY, "v1", "input")
         )

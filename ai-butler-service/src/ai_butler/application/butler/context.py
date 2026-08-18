@@ -11,6 +11,8 @@ from ai_butler.adapters.conversation_router import (
 )
 from ai_butler.adapters.embedding import EmbeddingProvider
 from ai_butler.adapters.llm import LLM
+from ai_butler.adapters.model_audit import DatabaseModelInvocationRecorder
+from ai_butler.adapters.model_routing import load_model_routing
 from ai_butler.adapters.search import SearchProvider
 from ai_butler.adapters.sms import MockSmsProvider, SmsProvider
 from ai_butler.adapters.vector import QdrantVectorStore, VectorStore
@@ -50,17 +52,25 @@ class ButlerContext:
         sms_provider: SmsProvider | None = None,
         conversation_router: ConversationRouter | None = None,
     ) -> ButlerContext:
+        invocation_recorder = DatabaseModelInvocationRecorder(database)
+        routing = (
+            load_model_routing(settings.model_routing_file, settings.app_env)
+            if settings.model_routing_enabled
+            else None
+        )
         resolved_search = search_provider or build_search_provider(settings)
-        resolved_embedding = embedding_provider or build_embedding_provider(settings)
+        resolved_embedding = embedding_provider or build_embedding_provider(
+            settings, invocation_recorder, routing
+        )
         resolved_vector = vector_store or QdrantVectorStore(
             settings.qdrant_url,
             settings.qdrant_collection,
-            settings.embedding_dimensions,
+            resolved_embedding.dimensions,
         )
-        resolved_llm = llm or build_llm(settings)
+        resolved_llm = llm or build_llm(settings, invocation_recorder, routing)
         resolved_router = conversation_router or (
             FakeConversationRouter()
-            if settings.llm_provider == "fake"
+            if not settings.model_routing_enabled
             else LLMConversationRouter(resolved_llm)
         )
         if sms_provider is None and settings.sms_provider != "mock":

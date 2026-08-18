@@ -8,6 +8,7 @@ WORKDIR /app
 
 RUN pip install --no-cache-dir uv==0.12.2
 COPY pyproject.toml uv.lock README.md ./
+COPY model-routing.toml ./
 COPY src ./src
 RUN --mount=type=cache,target=/root/.cache/uv uv sync --frozen --no-dev --no-compile-bytecode
 

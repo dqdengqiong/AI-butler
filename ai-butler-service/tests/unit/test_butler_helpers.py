@@ -172,22 +172,8 @@ def test_provider_factories_summaries_and_draft_scheduling() -> None:
         ).__class__.__name__
         == "TavilySearchProvider"
     )
-    assert (
-        ButlerService._build_embedding_provider(
-            Settings(embedding_model="text-embedding", llm_api_key=placeholder_credential)
-        ).__class__.__name__
-        == "OpenAICompatibleEmbeddingProvider"
-    )
-    assert (
-        ButlerService._build_llm(
-            Settings(llm_provider="openai-compatible", llm_api_key=placeholder_credential)
-        ).__class__.__name__
-        == "OpenAICompatibleLLM"
-    )
     with pytest.raises(ValueError, match="unsupported search provider"):
         ButlerService._build_search_provider(Settings(search_provider="unknown"))
-    with pytest.raises(ValueError, match="unsupported llm provider"):
-        ButlerService._build_llm(Settings(llm_provider="unknown"))
     assert ButlerService._safe_summary("  两行\n 请求  ") == "用户提交了 5 个字符的请求"
 
     interpretation = AvailabilityInterpretationV1(

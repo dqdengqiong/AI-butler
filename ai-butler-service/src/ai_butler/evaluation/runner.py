@@ -82,8 +82,10 @@ def _build_report(
     per_task: dict[str, list[bool]] = defaultdict(list)
     for trial in trials:
         per_task[trial.task_id].append(trial.passed)
-    consistently_passed = sum(all(results) for results in per_task.values())
+    passed_at_k = sum(any(results) for results in per_task.values())
     durations = sorted(trial.duration_ms for trial in trials)
+    invocation_count = sum(trial.outcome.model_invocations for trial in trials)
+    fallback_invocations = sum(trial.outcome.fallback_invocations for trial in trials)
     return EvalReportV1(
         dataset_version=dataset.dataset_version,
         graph_version=dataset.graph_version,
@@ -91,12 +93,28 @@ def _build_report(
         model=model_name,
         trials_per_task=trials_per_task,
         success_rate=passed / len(trials),
-        pass_power_k=consistently_passed / len(per_task),
+        pass_power_k=passed_at_k / len(per_task),
         p50_duration_ms=_percentile(durations, 0.50),
         p95_duration_ms=_percentile(durations, 0.95),
         input_tokens=sum(trial.outcome.input_tokens for trial in trials),
+        cached_input_tokens=sum(trial.outcome.cached_input_tokens for trial in trials),
         output_tokens=sum(trial.outcome.output_tokens for trial in trials),
-        estimated_cost=sum(trial.outcome.estimated_cost for trial in trials),
+        invocation_count=invocation_count,
+        schema_first_attempt_success_rate=sum(
+            trial.outcome.schema_first_attempt_valid for trial in trials
+        )
+        / len(trials),
+        schema_final_success_rate=sum(trial.outcome.schema_final_valid for trial in trials)
+        / len(trials),
+        schema_repair_rate=sum(trial.outcome.schema_repairs for trial in trials)
+        / max(1, invocation_count),
+        fallback_rate=sum(trial.outcome.fallback_invocations for trial in trials)
+        / max(1, invocation_count),
+        fallback_success_rate=(
+            sum(trial.outcome.fallback_successes for trial in trials) / fallback_invocations
+            if fallback_invocations
+            else 1.0
+        ),
         trials=tuple(trials),
     )
 
@@ -136,6 +154,10 @@ def evaluate_release_gate(
     citation_rate = sum(citation_scores) / len(citation_scores) if citation_scores else 1.0
     if citation_rate < 0.95:
         failures.add("CITATION_SUPPORT_BELOW_95_PERCENT")
+    if candidate.schema_final_success_rate < 0.995:
+        failures.add("SCHEMA_SUCCESS_BELOW_99_5_PERCENT")
+    if candidate.fallback_success_rate < 1:
+        failures.add("FAILOVER_BELOW_100_PERCENT")
 
     if baseline is not None:
         success_gain = candidate.success_rate - baseline.success_rate

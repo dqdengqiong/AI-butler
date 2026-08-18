@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import ClassVar, Protocol
 
-from ai_butler.adapters.llm import LLM, ModelRequest
+from ai_butler.adapters.llm import LLM, ModelRequest, ModelResponse, ModelTask
 
 
 class ConversationRoute(StrEnum):
@@ -79,7 +79,7 @@ class LLMConversationRouter:
         self._llm = llm
 
     async def route(self, request: ConversationRouteRequest) -> ConversationRouteDecision:
-        prompt = {
+        prompt: dict[str, object] = {
             "instruction": (
                 "判断新输入是否延续当前话题。仅返回 JSON："
                 '{"route":"CONTINUE|NEW_TOPIC|AMBIGUOUS","confidence":0到1,'
@@ -91,22 +91,59 @@ class LLMConversationRouter:
             "idle_seconds": request.idle_seconds,
         }
         try:
-            response = await self._llm.generate(
-                ModelRequest(
-                    prompt_version="conversation-router-v1",
-                    user_input=json.dumps(prompt, ensure_ascii=False),
+            response = await self._generate("conversation-router-v1", prompt)
+            decision = self._parse(response.content)
+            if decision is None:
+                repair: dict[str, object] = {
+                    "instruction": "只修复为原要求的 JSON，不要解释。",
+                    "invalid_output": response.content[:2000],
+                    "original_request": prompt,
+                }
+                response = await self._generate(
+                    "conversation-router-v1-repair",
+                    repair,
+                    model_profile=response.model_profile,
+                    attempt_offset=response.attempt,
                 )
-            )
-            payload = json.loads(response.content)
-            route = ConversationRoute(str(payload["route"]))
-            confidence = float(payload["confidence"])
-            reason = str(payload["reason_code"])
-            if not 0 <= confidence <= 1 or not re.fullmatch(r"[A-Z0-9_]{1,64}", reason):
+                decision = self._parse(response.content)
+            if decision is None:
                 raise ValueError("invalid router response")
-            return ConversationRouteDecision(route, confidence, reason)
+            return decision
         except Exception:
             return ConversationRouteDecision(
                 ConversationRoute.CONTINUE,
                 0.0,
                 "ROUTER_UNAVAILABLE_CONTINUE",
             )
+
+    async def _generate(
+        self,
+        prompt_version: str,
+        prompt: dict[str, object],
+        *,
+        model_profile: str | None = None,
+        attempt_offset: int = 0,
+    ) -> ModelResponse:
+        return await self._llm.generate(
+            ModelRequest.user(
+                ModelTask.CONVERSATION_ROUTER,
+                prompt_version,
+                json.dumps(prompt, ensure_ascii=False),
+                schema_version="1.0",
+                model_profile=model_profile,
+                attempt_offset=attempt_offset,
+            )
+        )
+
+    @staticmethod
+    def _parse(content: str) -> ConversationRouteDecision | None:
+        try:
+            payload = json.loads(content)
+            route = ConversationRoute(str(payload["route"]))
+            confidence = float(payload["confidence"])
+            reason = str(payload["reason_code"])
+            if not 0 <= confidence <= 1 or not re.fullmatch(r"[A-Z0-9_]{1,64}", reason):
+                return None
+            return ConversationRouteDecision(route, confidence, reason)
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+            return None

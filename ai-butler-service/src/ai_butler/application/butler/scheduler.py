@@ -7,6 +7,7 @@ from uuid import UUID, uuid5
 from sqlalchemy import text
 
 from ai_butler.adapters.documents import SUPPORTED_RAG_MIME_TYPES, chunk_text, extract_text
+from ai_butler.adapters.embedding import EmbeddingProviderError
 from ai_butler.adapters.vector import VectorPoint, VectorStoreError
 
 from .context import ButlerContext
@@ -173,7 +174,7 @@ class SchedulerService:
                 digest = hashlib.sha256(chunk.content.encode()).hexdigest()
                 chunk_id = uuid5(document_id, f"chunk:{chunk.index}:{digest}")
                 vector = await self.embedding_provider.embed(chunk.content)
-                if len(vector) != self.settings.embedding_dimensions:
+                if len(vector) != self.embedding_provider.dimensions:
                     raise ValueError("embedding dimension mismatch")
                 points.append(
                     VectorPoint(
@@ -209,7 +210,7 @@ class SchedulerService:
                         {
                             **row,
                             "document": document_id,
-                            "model": self.settings.embedding_model,
+                            "model": self.embedding_provider.model,
                             "collection": self.settings.qdrant_collection,
                         },
                     )
@@ -220,7 +221,7 @@ class SchedulerService:
                     ),
                     {"id": document_id},
                 )
-        except (OSError, UnicodeError, ValueError, VectorStoreError):
+        except (OSError, UnicodeError, ValueError, EmbeddingProviderError, VectorStoreError):
             async with self.database.transaction() as connection:
                 await connection.execute(
                     text(

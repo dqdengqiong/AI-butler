@@ -42,8 +42,9 @@ def _passing_outcome(task: AgentEvalTaskV1) -> AgentEvalOutcomeV1:
         tool_calls=tuple(EvalToolCallV1(name=name) for name in expected.tool_policy.required),
         side_effects=expected.side_effects,
         input_tokens=10,
+        cached_input_tokens=2,
         output_tokens=5,
-        estimated_cost=0.001,
+        model_invocations=1,
     )
 
 
@@ -197,8 +198,11 @@ async def test_runner_aggregates_three_trials_without_exposing_raw_inputs() -> N
     assert report.pass_power_k == 1
     assert report.trials_per_task == 3
     assert report.input_tokens == 30
+    assert report.cached_input_tokens == 6
     assert report.output_tokens == 15
-    assert report.estimated_cost == pytest.approx(0.003)
+    assert report.invocation_count == 3
+    assert report.schema_first_attempt_success_rate == 1
+    assert report.schema_final_success_rate == 1
     serialized = report.model_dump_json()
     assert task.input not in serialized
     assert dataset.graph_version in serialized

@@ -3,7 +3,7 @@ from __future__ import annotations
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import Field, model_validator
+from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -54,12 +54,10 @@ class Settings(BaseSettings):
     search_timeout_seconds: float = 15.0
     search_max_queries: int = 3
     search_max_results: int = 5
-    llm_provider: str = "fake"
-    llm_base_url: str = ""
-    llm_api_key: str = ""
-    chat_model: str = "fake-chat-v1"
-    embedding_model: str = "fake-embedding-v1"
-    embedding_dimensions: int = 8
+    model_routing_enabled: bool = False
+    model_shadow_mode: bool = False
+    model_routing_file: Path = Path("model-routing.toml")
+    model_api_keys: dict[str, SecretStr] = Field(default_factory=dict)
     wechat_auth_mode: str = "mock"
     wechat_app_id: str = ""
     wechat_app_secret: str = ""
@@ -85,7 +83,7 @@ class Settings(BaseSettings):
     checkpoint_retention_days: int = 7
     log_level: str = "INFO"
     tracing_enabled: bool = False
-    eval_runner_factory: str = ""
+    eval_runner_factories: dict[str, str] = Field(default_factory=dict)
     eval_results_path: Path = Path("eval-results/live.json")
 
     @model_validator(mode="after")
@@ -117,6 +115,10 @@ class Settings(BaseSettings):
             raise ValueError("conversation topic idle threshold must be at least one hour")
         if not 0.5 <= self.conversation_topic_confidence <= 1:
             raise ValueError("conversation topic confidence must be between 0.5 and 1")
+        if self.model_shadow_mode and not self.model_routing_enabled:
+            raise ValueError("model shadow mode requires real model routing")
+        if self.model_shadow_mode and self.app_env.lower() in {"production", "staging"}:
+            raise ValueError("model shadow mode is only allowed in evaluation environments")
         return self
 
 

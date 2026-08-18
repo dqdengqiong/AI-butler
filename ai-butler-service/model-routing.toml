@@ -1,0 +1,147 @@
+[providers.qwen]
+base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+api_key_ref = "qwen" # pragma: allowlist secret
+region = "cn"
+data_residency = "cn"
+
+[providers.doubao]
+base_url = "https://ark.cn-beijing.volces.com/api/v3"
+api_key_ref = "doubao" # pragma: allowlist secret
+region = "cn-beijing"
+data_residency = "cn"
+
+[models.qwen_balanced]
+provider = "qwen"
+model = "qwen3.7-plus-2026-05-26"
+protocol = "openai_chat"
+structured_output = true
+multimodal = true
+tools = true
+context_window_tokens = 1000000
+
+[models.doubao_turbo]
+provider = "doubao"
+model = "doubao-seed-2-1-turbo-260628"
+protocol = "openai_responses"
+structured_output = true
+multimodal = true
+tools = true
+context_window_tokens = 256000
+
+[embedding]
+provider = "qwen"
+model = "text-embedding-v4"
+dimensions = 1024
+
+[routes.conversation_router]
+primary = "qwen_balanced"
+fallbacks = ["doubao_turbo"]
+timeout_ms = 10000
+max_input_tokens = 16000
+max_output_tokens = 512
+thinking = "disabled"
+output_mode = "JSON"
+max_attempts = 3
+
+[routes.availability]
+primary = "qwen_balanced"
+fallbacks = ["doubao_turbo"]
+timeout_ms = 10000
+max_input_tokens = 16000
+max_output_tokens = 1024
+thinking = "disabled"
+output_mode = "JSON"
+max_attempts = 3
+
+[routes.profile]
+primary = "qwen_balanced"
+fallbacks = ["doubao_turbo"]
+timeout_ms = 10000
+max_input_tokens = 16000
+max_output_tokens = 1024
+thinking = "disabled"
+output_mode = "JSON"
+max_attempts = 3
+
+[routes.goal_normalize]
+primary = "qwen_balanced"
+fallbacks = ["doubao_turbo"]
+timeout_ms = 10000
+max_input_tokens = 16000
+max_output_tokens = 1024
+thinking = "disabled"
+output_mode = "JSON"
+max_attempts = 3
+
+[routes.memory_command]
+primary = "qwen_balanced"
+fallbacks = ["doubao_turbo"]
+timeout_ms = 10000
+max_input_tokens = 16000
+max_output_tokens = 1024
+thinking = "disabled"
+output_mode = "JSON"
+max_attempts = 3
+
+[routes.memory_extractor]
+primary = "qwen_balanced"
+fallbacks = ["doubao_turbo"]
+timeout_ms = 10000
+max_input_tokens = 32000
+max_output_tokens = 2048
+thinking = "disabled"
+output_mode = "JSON"
+max_attempts = 3
+
+[routes.research]
+primary = "qwen_balanced"
+fallbacks = ["doubao_turbo"]
+timeout_ms = 30000
+max_input_tokens = 128000
+max_output_tokens = 8192
+thinking = "enabled"
+output_mode = "JSON"
+requires_tools = true
+max_attempts = 3
+
+[routes.planner]
+primary = "qwen_balanced"
+fallbacks = ["doubao_turbo"]
+timeout_ms = 30000
+max_input_tokens = 128000
+max_output_tokens = 8192
+thinking = "enabled"
+output_mode = "JSON"
+max_attempts = 3
+
+[routes.feedback_adjust]
+primary = "qwen_balanced"
+fallbacks = ["doubao_turbo"]
+timeout_ms = 20000
+max_input_tokens = 64000
+max_output_tokens = 4096
+thinking = "disabled"
+output_mode = "JSON"
+max_attempts = 3
+
+[routes.response]
+primary = "qwen_balanced"
+fallbacks = ["doubao_turbo"]
+timeout_ms = 20000
+max_input_tokens = 128000
+max_output_tokens = 8192
+thinking = "disabled"
+output_mode = "TEXT"
+requires_structured_output = false
+max_attempts = 3
+
+[routes.multimodal]
+primary = "qwen_balanced"
+fallbacks = ["doubao_turbo"]
+timeout_ms = 30000
+max_input_tokens = 128000
+max_output_tokens = 4096
+thinking = "disabled"
+output_mode = "JSON"
+requires_multimodal = true
+max_attempts = 3

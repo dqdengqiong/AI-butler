@@ -11,21 +11,25 @@ from ai_butler.adapters.llm import (
     ModelRateLimitError,
     ModelRequest,
     ModelServerError,
+    ModelTask,
     ModelTimeoutError,
 )
 
 
 async def test_fake_llm_returns_valid_structured_content() -> None:
-    response = await FakeLLM().generate(ModelRequest(prompt_version="router-v1", user_input="hi"))
+    response = await FakeLLM().generate(
+        ModelRequest.user(ModelTask.CONVERSATION_ROUTER, "router-v1", "hi")
+    )
     assert json.loads(response.content) == {"status": "ok"}
     assert response.prompt_version == "router-v1"
 
 
 async def test_fake_llm_can_return_invalid_json() -> None:
     response = await FakeLLM().generate(
-        ModelRequest(
-            prompt_version="router-v1",
-            user_input="hi",
+        ModelRequest.user(
+            ModelTask.CONVERSATION_ROUTER,
+            "router-v1",
+            "hi",
             scenario=FakeScenario.INVALID_JSON,
         )
     )
@@ -47,7 +51,12 @@ async def test_fake_llm_failure_scenarios(
 ) -> None:
     with pytest.raises(error):
         await FakeLLM().generate(
-            ModelRequest(prompt_version="router-v1", user_input="hi", scenario=scenario)
+            ModelRequest.user(
+                ModelTask.CONVERSATION_ROUTER,
+                "router-v1",
+                "hi",
+                scenario=scenario,
+            )
         )
 
 

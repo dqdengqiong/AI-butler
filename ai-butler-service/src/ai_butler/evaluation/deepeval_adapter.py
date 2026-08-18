@@ -85,7 +85,6 @@ def outcome_to_test_case(
             for name in task.expected_outcome.tool_policy.required
         ]
         or None,
-        token_cost=outcome.estimated_cost,
         name=task.task_id,
         tags=[suite.value for suite in task.suites],
         metadata={"task_id": task.task_id, "synthetic_data": True},

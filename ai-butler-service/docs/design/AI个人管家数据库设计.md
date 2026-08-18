@@ -366,7 +366,6 @@ PostgreSQL 是业务事实唯一来源；外围存储失败时通过状态字段
 | `error_detail` | `jsonb` | 是 | 脱敏错误信息 |
 | `input_tokens` | `integer` | 否 | 默认 0 |
 | `output_tokens` | `integer` | 否 | 默认 0 |
-| `estimated_cost` | `numeric(12,4)` | 否 | 默认 0 |
 | `trace_id` | `varchar(128)` | 否 | 创建 run 时生成的全链路 ID |
 | `worker_id` | `varchar(128)` | 是 | 当前领取该 run 的 Worker 实例 |
 | `lease_expires_at` | `timestamptz` | 是 | Worker 租约到期时间 |
@@ -382,7 +381,7 @@ PostgreSQL 是业务事实唯一来源；外围存储失败时通过状态字段
 
 - `trigger_message_id` 唯一，保证作为初始触发消息的 User 消息最多创建一个 run；后续输入恢复消息关联同一 run，但不写入该字段。
 - `trace_id` 唯一并在 run 生命周期内不可变；所有 span 必须复用该值。
-- token、成本、尝试次数和 `last_event_sequence` 不得为负。
+- Token、尝试次数和 `last_event_sequence` 不得为负。
 - 终态 `SUCCEEDED`、`FAILED_FINAL`、`CANCELLED` 要求 `completed_at` 非空。
 - `CANCEL_REQUESTED` 要求 `cancel_requested_at` 非空。
 - 部分唯一索引：`conversation_id`，仅状态为 `QUEUED`、`RUNNING`、`AWAITING_INPUT`、`AWAITING_APPROVAL`、`FAILED_RETRYABLE`、`CANCEL_REQUESTED` 时生效，保证一个会话最多一个活动 run。
@@ -396,6 +395,12 @@ PostgreSQL 是业务事实唯一来源；外围存储失败时通过状态字段
 - Worker 不能在领取任务时立即清空 `pending_action`。只有确认 checkpoint 已包含相同 action key 后，才能把 key 复制到 `last_applied_action_key` 并清空 pending 字段，避免领取后崩溃导致恢复命令丢失。
 - 是否已执行业务副作用仍由任务、通知、审批等领域唯一键判断，不能只依赖 action key。
 - Worker 启动或恢复图前必须加载同时匹配 `graph_version`、`capability_registry_version` 和 `capability_registry_fingerprint` 的不可变快照；不允许用当前默认 registry 自动升级非终态 run。
+
+### 5.6.1 `model_invocations`
+
+保存聊天模型与 Embedding 的非敏感调用元数据。字段包括可空 `request_id/run_id`、task、provider、实际 model、Prompt/Schema 版本、attempt、主备角色、状态、输入/缓存/输出 Token、耗时、错误分类和创建时间。表中不保存 Prompt、用户原文、检索或文件正文、工具原始输出、思维链、密钥、单价或估算金额。
+
+按小时聚合视图 `model_invocation_metrics_hourly` 提供节点/供应商/模型维度的调用次数、Token、P50/P95、成功率、Schema 修复率和切换率。`run_id` 删除时设空，审计记录不反向阻止 run 清理。
 
 ### 5.7 `agent_run_events`
 

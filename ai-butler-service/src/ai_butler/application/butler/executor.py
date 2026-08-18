@@ -162,7 +162,8 @@ class RunExecutor:
                 or bool(TIME_PATTERN.search(current_input))
             ):
                 availability_candidate = await self.availability_interpreter.interpret(
-                    current_input
+                    current_input,
+                    run_id=run_id,
                 )
 
         # 计划类请求先确认时间，再进行可能产生费用的检索；确认前不预取或缓存用户查询。

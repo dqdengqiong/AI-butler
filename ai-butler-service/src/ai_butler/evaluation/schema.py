@@ -142,8 +142,26 @@ class AgentEvalOutcomeV1(BaseModel):
     side_effects: dict[str, int] = Field(default_factory=dict)
     security_violations: tuple[str, ...] = ()
     input_tokens: int = Field(default=0, ge=0)
+    cached_input_tokens: int = Field(default=0, ge=0)
     output_tokens: int = Field(default=0, ge=0)
-    estimated_cost: float = Field(default=0, ge=0)
+    model_invocations: int = Field(default=0, ge=0)
+    schema_repairs: int = Field(default=0, ge=0)
+    fallback_invocations: int = Field(default=0, ge=0)
+    fallback_successes: int = Field(default=0, ge=0)
+    schema_first_attempt_valid: bool = True
+    schema_final_valid: bool = True
+
+    @model_validator(mode="after")
+    def validate_model_invocation_counts(self) -> AgentEvalOutcomeV1:
+        if self.schema_repairs > self.model_invocations:
+            raise ValueError("schema repairs cannot exceed model invocations")
+        if self.fallback_invocations > self.model_invocations:
+            raise ValueError("fallback invocations cannot exceed model invocations")
+        if self.fallback_successes > self.fallback_invocations:
+            raise ValueError("fallback successes cannot exceed fallback invocations")
+        if self.schema_first_attempt_valid and self.schema_repairs:
+            raise ValueError("schema repair requires an invalid first attempt")
+        return self
 
 
 class MetricResultV1(BaseModel):
@@ -180,8 +198,14 @@ class EvalReportV1(BaseModel):
     p50_duration_ms: int = Field(ge=0)
     p95_duration_ms: int = Field(ge=0)
     input_tokens: int = Field(ge=0)
+    cached_input_tokens: int = Field(ge=0)
     output_tokens: int = Field(ge=0)
-    estimated_cost: float = Field(ge=0)
+    invocation_count: int = Field(ge=0)
+    schema_first_attempt_success_rate: float = Field(ge=0, le=1)
+    schema_final_success_rate: float = Field(ge=0, le=1)
+    schema_repair_rate: float = Field(ge=0, le=1)
+    fallback_rate: float = Field(ge=0, le=1)
+    fallback_success_rate: float = Field(ge=0, le=1)
     trials: tuple[AgentEvalTrialV1, ...]
 
 

@@ -10,7 +10,8 @@ from ai_butler.adapters.embedding import (
     FakeEmbeddingProvider,
     OpenAICompatibleEmbeddingProvider,
 )
-from ai_butler.adapters.llm import LLM, FakeLLM, OpenAICompatibleLLM
+from ai_butler.adapters.llm import LLM, FakeLLM, ModelGateway, ModelInvocationRecorder
+from ai_butler.adapters.model_routing import ModelRoutingConfig, load_model_routing
 from ai_butler.adapters.search import FakeSearchProvider, SearchProvider, TavilySearchProvider
 from ai_butler.agent.availability import AvailabilityInterpretationV1
 from ai_butler.api.schemas import AvailabilityRequest
@@ -90,26 +91,44 @@ def build_search_provider(settings: Settings) -> SearchProvider:
     raise ValueError(f"unsupported search provider: {settings.search_provider}")
 
 
-def build_embedding_provider(settings: Settings) -> EmbeddingProvider:
-    if settings.embedding_model == "fake-embedding-v1":
+def build_embedding_provider(
+    settings: Settings,
+    recorder: ModelInvocationRecorder | None = None,
+    routing: ModelRoutingConfig | None = None,
+) -> EmbeddingProvider:
+    if not settings.model_routing_enabled:
         return FakeEmbeddingProvider()
+    routing = routing or load_model_routing(settings.model_routing_file, settings.app_env)
+    profile = routing.embedding
+    provider = routing.providers[profile.provider]
+    secret = settings.model_api_keys.get(provider.api_key_ref)
+    if secret is None:
+        raise ValueError(f"missing model API key: {provider.api_key_ref}")
     return OpenAICompatibleEmbeddingProvider(
-        settings.llm_api_key,
-        settings.llm_base_url,
-        settings.embedding_model,
+        secret.get_secret_value(),
+        provider.base_url,
+        profile.model,
+        profile.dimensions,
+        provider=profile.provider,
+        recorder=recorder,
     )
 
 
-def build_llm(settings: Settings) -> LLM:
-    if settings.llm_provider == "fake":
-        return FakeLLM(settings.chat_model)
-    if settings.llm_provider == "openai-compatible":
-        return OpenAICompatibleLLM(
-            settings.llm_api_key,
-            settings.llm_base_url,
-            settings.chat_model,
-        )
-    raise ValueError(f"unsupported llm provider: {settings.llm_provider}")
+def build_llm(
+    settings: Settings,
+    recorder: ModelInvocationRecorder | None = None,
+    routing: ModelRoutingConfig | None = None,
+) -> LLM:
+    if not settings.model_routing_enabled:
+        return FakeLLM()
+    routing = routing or load_model_routing(settings.model_routing_file, settings.app_env)
+    api_keys = {name: secret.get_secret_value() for name, secret in settings.model_api_keys.items()}
+    return ModelGateway(
+        routing,
+        api_keys,
+        recorder,
+        shadow_mode=settings.model_shadow_mode,
+    )
 
 
 def safe_summary(content: str) -> str:
