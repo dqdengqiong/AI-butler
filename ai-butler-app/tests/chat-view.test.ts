@@ -16,9 +16,19 @@ const composerSource = readFileSync(
   fileURLToPath(new URL('../src/components/chat/ChatComposer.vue', import.meta.url)),
   'utf8',
 )
+const statusSource = readFileSync(
+  fileURLToPath(new URL('../src/components/chat/ChatStatusCard.vue', import.meta.url)),
+  'utf8',
+)
+const planSource = readFileSync(
+  fileURLToPath(new URL('../src/components/chat/ChatPlanCard.vue', import.meta.url)),
+  'utf8',
+)
 const chatTemplate = parse(chatSource).descriptor.template?.content ?? ''
 const welcomeTemplate = parse(welcomeSource).descriptor.template?.content ?? ''
 const composerTemplate = parse(composerSource).descriptor.template?.content ?? ''
+const statusTemplate = parse(statusSource).descriptor.template?.content ?? ''
+const planTemplate = parse(planSource).descriptor.template?.content ?? ''
 
 describe('chat entry layout', () => {
   it('only shows agent discovery on the general empty welcome state', () => {
@@ -37,5 +47,17 @@ describe('chat entry layout', () => {
       composerTemplate.indexOf('class="composer-shell"'),
     )
     expect(composerTemplate).not.toContain('class="agent-shortcut"')
+  })
+
+  it('offers retry only for retryable terminal run errors', () => {
+    expect(statusTemplate).toContain("item.state === 'error' && item.retryable !== false")
+    expect(statusTemplate).toContain("$emit('retry', item)")
+    expect(statusTemplate).toContain('重新生成')
+  })
+
+  it('shows the confirmed period and weekly investment on plan cards', () => {
+    expect(planTemplate).toContain('plan.startDate && plan.endDate')
+    expect(planTemplate).toContain('{{ plan.startDate }} 至 {{ plan.endDate }}')
+    expect(planTemplate).toContain('plan.weeklyMinutes')
   })
 })

@@ -7,6 +7,7 @@ from uuid import UUID, uuid4
 from sqlalchemy import text
 
 from ai_butler.agent.runtime import DEFAULT_CAPABILITY_REGISTRY
+from ai_butler.agent.versions import CURRENT_GRAPH_VERSION, CURRENT_PROMPT_BUNDLE_VERSION
 from ai_butler.api.schemas import (
     SendMessageRequest,
 )
@@ -165,7 +166,7 @@ class MessageService:
                     payload.get("input_mode") == "NATURAL_LANGUAGE"
                     and len(request.selection.selected_option_ids) != 1
                 ):
-                    raise ButlerError("INVALID_SELECTION_COUNT", "学习时间只能提交一个选择", 400)
+                    raise ButlerError("INVALID_SELECTION_COUNT", "当前卡片只能提交一个选择", 400)
                 labels = [
                     str(by_id[option_id].get("label", option_id))
                     for option_id in request.selection.selected_option_ids
@@ -181,6 +182,7 @@ class MessageService:
                         by_id[option_id] for option_id in request.selection.selected_option_ids
                     ],
                     "interpretation": payload.get("interpretation"),
+                    "plan_scope": payload.get("plan_scope"),
                 }
                 payload["submitted"] = True
                 payload["submitted_option_ids"] = request.selection.selected_option_ids
@@ -299,9 +301,11 @@ class MessageService:
                     text(
                         "INSERT INTO agent_runs(id,user_id,conversation_id,segment_id,trigger_message_id,"
                         "pending_message_id,pending_response_message_id,status,pending_action,pending_action_key,"
-                        "input_summary,selected_user_agent_id,capability_registry_fingerprint,trace_id) "
+                        "input_summary,selected_user_agent_id,graph_version,prompt_bundle_version,"
+                        "capability_registry_fingerprint,trace_id) "
                         "VALUES(:id,:user_id,:conversation_id,:segment_id,:request_id,:request_id,:response_id,'QUEUED',"
-                        "'START',:action_key,:summary,:selected_agent,:registry_fingerprint,:trace_id)"
+                        "'START',:action_key,:summary,:selected_agent,:graph_version,:prompt_bundle_version,"
+                        ":registry_fingerprint,:trace_id)"
                     ),
                     {
                         "id": run_id,
@@ -313,6 +317,8 @@ class MessageService:
                         "action_key": f"start:{request.client_message_id}",
                         "summary": self._safe_summary(request.content),
                         "selected_agent": conversation["specialist_user_agent_id"],
+                        "graph_version": CURRENT_GRAPH_VERSION,
+                        "prompt_bundle_version": CURRENT_PROMPT_BUNDLE_VERSION,
                         "registry_fingerprint": DEFAULT_CAPABILITY_REGISTRY.fingerprint,
                         "trace_id": str(uuid4()),
                     },

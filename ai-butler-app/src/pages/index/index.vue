@@ -77,6 +77,7 @@ const {
   editPlan,
   editingPlan,
   rejectPlan,
+  retryRun,
   selectOption,
   sendMessage,
   submitSelection,
@@ -320,6 +321,7 @@ async function requestAdjustment(): Promise<void> {
         @edit-plan="editPlan"
         @reject-plan="rejectPlan"
         @open-source="openSource"
+        @retry-run="retryRun"
         @select-agent="activateAgent"
       />
     </view>

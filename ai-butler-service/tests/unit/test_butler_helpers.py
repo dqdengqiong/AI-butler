@@ -159,13 +159,14 @@ def test_conversation_projection_includes_specialist_run_and_preview() -> None:
 
 def test_provider_factories_summaries_and_draft_scheduling() -> None:
     placeholder_credential = "credential-placeholder"
-    assert ButlerService._build_search_provider(Settings()).__class__.__name__ == (
+    fake_settings = Settings(model_routing_enabled=False)
+    assert ButlerService._build_search_provider(fake_settings).__class__.__name__ == (
         "FakeSearchProvider"
     )
-    assert ButlerService._build_embedding_provider(Settings()).__class__.__name__ == (
+    assert ButlerService._build_embedding_provider(fake_settings).__class__.__name__ == (
         "FakeEmbeddingProvider"
     )
-    assert ButlerService._build_llm(Settings()).__class__.__name__ == "FakeLLM"
+    assert ButlerService._build_llm(fake_settings).__class__.__name__ == "FakeLLM"
     assert (
         ButlerService._build_search_provider(
             Settings(search_provider="tavily", tavily_api_key=placeholder_credential)

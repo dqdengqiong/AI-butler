@@ -12,6 +12,7 @@ import type {
 } from '@/types/view-models'
 
 type PlanChatItem = Extract<ChatItem, { kind: 'plan' }>
+type StatusChatItem = Extract<ChatItem, { kind: 'status' }>
 
 const props = defineProps<{
   items: ChatItem[]
@@ -32,6 +33,7 @@ const emit = defineEmits<{
   rejectPlan: [item: PlanChatItem]
   openSource: [citationId: string]
   selectAgent: [agentCode: AgentShortcutCode]
+  retryRun: [item: StatusChatItem]
 }>()
 
 const isFreshConversation = computed(
@@ -63,6 +65,7 @@ const activeAgent = computed(() =>
         @edit-plan="(item) => emit('editPlan', item)"
         @reject-plan="(item) => emit('rejectPlan', item)"
         @open-source="(citationId) => emit('openSource', citationId)"
+        @retry-run="(item) => emit('retryRun', item)"
       />
     </scroll-view>
     <ChatComposer

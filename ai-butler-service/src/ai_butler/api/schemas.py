@@ -238,6 +238,8 @@ class PlanCardPlanV11(BaseModel):
     title: str
     objective_summary: str
     weekly_minutes: int = Field(gt=0)
+    start_date: date | None = None
+    end_date: date | None = None
 
 
 class PlanCardPayloadV11(BaseModel):

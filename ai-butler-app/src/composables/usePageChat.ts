@@ -7,6 +7,7 @@ import { useButlerStore } from '@/stores/butler'
 import type { ChatItem, UploadedAttachment } from '@/types/view-models'
 
 type PlanChatItem = Extract<ChatItem, { kind: 'plan' }>
+type StatusChatItem = Extract<ChatItem, { kind: 'status' }>
 
 function confirmSwitch(title: string, content: string, confirmText: string): Promise<boolean> {
   return new Promise((resolve) => {
@@ -87,6 +88,19 @@ export function usePageChat(token: () => string, attachments: Ref<UploadedAttach
     }
   }
 
+  async function retryRun(item: StatusChatItem): Promise<void> {
+    if (item.retryable === false || !item.runId || item.retrying) return
+    item.retrying = true
+    try {
+      await butler.retryRun(item.runId, item.attempt, token())
+    } catch (error) {
+      // retry 接口使用 expected_attempt 做并发保护；失败时保留原错误卡，允许用户
+      // 在刷新服务端事实后再次操作，而不是乐观地假装 run 已恢复。
+      item.retrying = false
+      uni.showToast({ title: error instanceof Error ? error.message : '重试失败', icon: 'none' })
+    }
+  }
+
   async function sendMessage(content: string): Promise<void> {
     const normalized = content.trim()
     const clientMessageId = `message-${Date.now()}-${Math.random().toString(36).slice(2)}`
@@ -155,6 +169,7 @@ export function usePageChat(token: () => string, attachments: Ref<UploadedAttach
     editPlan,
     editingPlan,
     rejectPlan,
+    retryRun,
     selectOption,
     sendMessage,
     submitSelection,

@@ -1,23 +1,21 @@
 import { computed, ref } from 'vue'
 import { defineStore } from 'pinia'
 
-import {
-  butlerApi,
-  type ApiObject,
-  type MessageResponse,
-  type SendMessageResponse,
-} from '@/api/butler'
+import { butlerApi, type ApiObject, type SendMessageResponse } from '@/api/butler'
 import { ApiError } from '@/api/client'
 import { connectRunStream, type RunStreamEvent } from '@/stream/transport'
+import { createRunRetry } from '@/stores/butler-run-retry'
+import { refreshConversationMessages } from '@/stores/butler-message-refresh'
 import {
   asArray,
   asObject,
   mapAgentDefinition,
   mapConversation,
-  mapMessage,
   mapPlan,
   mapTask,
   numberValue,
+  progressLabels,
+  runErrorPresentation,
   stringValue,
 } from '@/stores/butler-projections'
 import type {
@@ -28,13 +26,6 @@ import type {
   PlanViewModel,
   TaskViewModel,
 } from '@/types/view-models'
-
-const progressLabels: Record<string, string> = {
-  SEARCHING_WEB: '正在检索网络',
-  RETRIEVING_PRIVATE: '正在检索我的资料',
-  ORGANIZING_CITATIONS: '正在整理引用',
-  GENERATING_ANSWER: '正在生成回答',
-}
 
 export interface SendMessageOptions {
   clientMessageId?: string
@@ -87,8 +78,8 @@ export const useButlerStore = defineStore('butler', () => {
   const loading = ref(false)
   const error = ref<string | null>(null)
   const activeRunId = ref<string | null>(null)
-  const streamConversationId = ref<string | null>(null)
   const streamConnection = ref<{ close(): void } | null>(null)
+  const streamMessageIds = new Map<string, string>()
 
   const pendingTasks = computed(() => tasks.value.filter((task) => !task.done))
 
@@ -126,17 +117,11 @@ export const useButlerStore = defineStore('butler', () => {
     accessToken: string,
     conversationId = activeConversationId.value,
   ): Promise<void> {
-    if (!conversationId) {
-      chatItems.value = []
-      return
-    }
-    const response = await butlerApi.messages(conversationId, accessToken)
-    // SSE 可以在用户查看另一个历史会话时完成，旧 run 不得覆盖当前时间线。
-    if (activeConversationId.value === conversationId) {
-      chatItems.value = response.items.flatMap((item: MessageResponse) =>
-        mapMessage(item as unknown as ApiObject),
-      )
-    }
+    return refreshConversationMessages(accessToken, conversationId, {
+      activeConversationId,
+      conversations,
+      chatItems,
+    })
   }
 
   async function loadConversation(conversationId: string, accessToken: string): Promise<void> {
@@ -170,7 +155,6 @@ export const useButlerStore = defineStore('butler', () => {
       if (!options.cancelExecuting) return 'CONFIRMATION_REQUIRED'
       await butlerApi.cancelRun(executing.runId as string, accessToken)
       if (activeRunId.value === executing.runId) activeRunId.value = null
-      streamConversationId.value = null
       streamConnection.value?.close()
       streamConnection.value = null
       await refreshConversations(accessToken)
@@ -262,7 +246,6 @@ export const useButlerStore = defineStore('butler', () => {
     activeConversationId.value = actualConversationId
     stagedScene.value = null
     activeRunId.value = stringValue(run, 'id')
-    streamConversationId.value = actualConversationId
     await Promise.all([
       refreshMessages(accessToken, actualConversationId),
       refreshConversations(accessToken),
@@ -307,11 +290,34 @@ export const useButlerStore = defineStore('butler', () => {
     })
   }
 
+  const retryState = { conversations, activeConversationId, chatItems, activeRunId }
+  const retryRun = createRunRetry(retryState, refreshConversations, startStream)
+
   async function applyStreamEvent(
     event: RunStreamEvent,
     conversationId: string,
     accessToken: string,
   ): Promise<void> {
+    if (event.event === 'message.start') {
+      if (activeConversationId.value !== conversationId) return
+      const messageId = stringValue(event.payload, 'message_id')
+      if (messageId) streamMessageIds.set(event.runId, messageId)
+      // 消息查询通常已返回空的 Assistant 占位；若 start 先于查询结果到达，
+      // 仍需创建临时投影，保证后续 delta 有明确归属而不污染上一轮回答。
+      if (
+        messageId &&
+        !chatItems.value.some((item) => item.kind === 'message' && item.messageId === messageId)
+      ) {
+        chatItems.value.push({
+          key: messageId,
+          messageId,
+          kind: 'message',
+          role: 'assistant',
+          content: '',
+        })
+      }
+      return
+    }
     if (event.event === 'progress') {
       if (activeConversationId.value !== conversationId) return
       const code = stringValue(event.payload, 'code')
@@ -332,27 +338,72 @@ export const useButlerStore = defineStore('butler', () => {
     if (event.event === 'message.delta') {
       if (activeConversationId.value !== conversationId) return
       const delta = stringValue(event.payload, 'delta')
-      const last = [...chatItems.value]
-        .reverse()
-        .find((item) => item.kind === 'message' && item.role === 'assistant')
-      if (last?.kind === 'message') last.content += delta
+      const messageId = streamMessageIds.get(event.runId)
+      let target = chatItems.value.find(
+        (item) => item.kind === 'message' && item.messageId === messageId,
+      )
+      if (!target) {
+        // 断线续传可能从 delta 开始，message.start 已在 after 游标之前。使用 run
+        // 级临时 key，完成事件到达后再由服务端消息投影整体覆盖。
+        const key = `stream-message-${event.runId}`
+        target = chatItems.value.find((item) => item.key === key)
+        if (!target) {
+          target = { key, kind: 'message', role: 'assistant', content: '' }
+          chatItems.value.push(target)
+        }
+      }
+      if (target.kind === 'message') target.content += delta
       return
     }
     if (event.event === 'message.reset') {
       if (activeConversationId.value !== conversationId) return
-      const last = [...chatItems.value]
-        .reverse()
-        .find((item) => item.kind === 'message' && item.role === 'assistant')
-      if (last?.kind === 'message') last.content = ''
+      const messageId = streamMessageIds.get(event.runId)
+      const target = chatItems.value.find(
+        (item) =>
+          item.kind === 'message' &&
+          (item.messageId === messageId || item.key === `stream-message-${event.runId}`),
+      )
+      if (target?.kind === 'message') target.content = ''
+      return
+    }
+    if (event.event === 'error') {
+      await Promise.all([
+        refreshMessages(accessToken, conversationId),
+        refreshConversations(accessToken),
+      ])
+      if (activeConversationId.value === conversationId) {
+        const retryable = event.payload.retryable === true
+        const errorCode = stringValue(event.payload, 'code')
+        const copy = runErrorPresentation(errorCode, retryable)
+        const key = `progress-${event.runId}`
+        const failure: ChatItem = {
+          key,
+          kind: 'status',
+          state: 'error',
+          title: copy.title,
+          description:
+            errorCode.startsWith('PLANNER_MODEL_') || errorCode.startsWith('PLAN_')
+              ? copy.description
+              : stringValue(event.payload, 'message', copy.description),
+          runId: event.runId,
+        }
+        Object.assign(failure, { attempt: event.attempt, retryable })
+        const index = chatItems.value.findIndex((item) => item.key === key)
+        if (index >= 0) chatItems.value[index] = failure
+        else chatItems.value.push(failure)
+      }
+      streamMessageIds.delete(event.runId)
+      streamConnection.value?.close()
+      streamConnection.value = null
       return
     }
     if (
       ['message.completed', 'interrupt', 'run.completed', 'run.cancelled'].includes(event.event)
     ) {
       await refreshMessages(accessToken, conversationId)
+      streamMessageIds.delete(event.runId)
       if (event.event.startsWith('run.')) {
         activeRunId.value = null
-        streamConversationId.value = null
         streamConnection.value?.close()
         const [response] = await Promise.all([
           butlerApi.dashboard(accessToken),
@@ -447,7 +498,7 @@ export const useButlerStore = defineStore('butler', () => {
     activeConversationId.value = null
     stagedScene.value = null
     activeRunId.value = null
-    streamConversationId.value = null
+    streamMessageIds.clear()
     error.value = null
   }
 
@@ -470,6 +521,7 @@ export const useButlerStore = defineStore('butler', () => {
     deleteConversation,
     loadConversation,
     sendMessage,
+    retryRun,
     approvePlan,
     completeTask,
     refreshMessages,

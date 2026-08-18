@@ -154,6 +154,12 @@ class Settings(BaseSettings):
             raise ValueError("model shadow mode requires real model routing")
         if self.model_shadow_mode and self.app_env.lower() in {"production", "staging"}:
             raise ValueError("model shadow mode is only allowed in evaluation environments")
+        if self.app_env.lower() in {"production", "staging"} and self.search_provider != "tavily":
+            raise ValueError("production and staging require the Tavily search provider")
+        if self.search_provider == "tavily" and not self.tavily_api_key:
+            raise ValueError("Tavily search provider requires an API key")
+        if any(not secret.get_secret_value().isascii() for secret in self.model_api_keys.values()):
+            raise ValueError("model API keys must contain ASCII characters only")
         return self
 
 

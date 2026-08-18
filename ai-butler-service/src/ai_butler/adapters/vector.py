@@ -74,16 +74,9 @@ class QdrantVectorStore:
             raise VectorStoreError("vector store request failed") from exc
         return body if isinstance(body, dict) else {}
 
-    async def _ensure_collection(self) -> None:
-        try:
-            async with httpx.AsyncClient(timeout=15, transport=self._transport) as client:
-                response = await client.get(f"{self._base_url}/collections/{self._collection}")
-        except httpx.HTTPError as exc:
-            raise VectorStoreError("vector store request failed") from exc
-        if response.status_code == 200:
-            return
-        if response.status_code != 404:
-            raise VectorStoreError("vector store request failed")
+    async def _create_collection(self) -> None:
+        """创建当前维度的 collection 以及授权过滤必需的 payload 索引。"""
+
         await self._request(
             "PUT",
             f"/collections/{self._collection}",
@@ -96,10 +89,44 @@ class QdrantVectorStore:
                 {"field_name": field_name, "field_schema": "keyword"},
             )
 
-    async def setup(self) -> None:
-        """创建 collection 和租户过滤所需 payload 索引。"""
+    async def _ensure_collection(self, *, repair_empty_dimension_mismatch: bool = False) -> None:
+        """确保 collection 存在且维度兼容。
 
-        await self._ensure_collection()
+        模型切换后，空 collection 可以在显式 setup 阶段安全重建；包含向量时必须
+        拒绝自动删除，要求运维先完成重建或迁移，避免静默丢失用户私有资料索引。
+        """
+
+        try:
+            async with httpx.AsyncClient(timeout=15, transport=self._transport) as client:
+                response = await client.get(f"{self._base_url}/collections/{self._collection}")
+        except httpx.HTTPError as exc:
+            raise VectorStoreError("vector store request failed") from exc
+        if response.status_code == 200:
+            try:
+                body = response.json()
+                result = body.get("result") if isinstance(body, dict) else None
+                config = result.get("config") if isinstance(result, dict) else None
+                params = config.get("params") if isinstance(config, dict) else None
+                vectors = params.get("vectors") if isinstance(params, dict) else None
+                configured_dimensions = vectors.get("size") if isinstance(vectors, dict) else None
+                points_count = result.get("points_count") if isinstance(result, dict) else None
+            except ValueError as exc:
+                raise VectorStoreError("vector store returned invalid collection metadata") from exc
+            if configured_dimensions == self._dimensions:
+                return
+            if not repair_empty_dimension_mismatch or points_count != 0:
+                raise VectorStoreError("vector store collection dimension mismatch")
+            await self._request("DELETE", f"/collections/{self._collection}", {})
+            await self._create_collection()
+            return
+        if response.status_code != 404:
+            raise VectorStoreError("vector store request failed")
+        await self._create_collection()
+
+    async def setup(self) -> None:
+        """创建 collection 和索引，并修复无数据的历史维度配置。"""
+
+        await self._ensure_collection(repair_empty_dimension_mismatch=True)
 
     async def upsert(self, points: tuple[VectorPoint, ...]) -> None:
         if not points:

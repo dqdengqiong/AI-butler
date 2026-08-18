@@ -13,16 +13,23 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, interrupt
 from sqlalchemy import text
 
+from ai_butler.agent.contracts import IntentDecisionV1
 from ai_butler.agent.runtime import DEFAULT_CAPABILITY_REGISTRY
+from ai_butler.agent.versions import (
+    CAPABILITY_REGISTRY_VERSION,
+    CURRENT_GRAPH_VERSION,
+    CURRENT_PROMPT_BUNDLE_VERSION,
+    LEGACY_GRAPH_VERSION,
+    LEGACY_PROMPT_BUNDLE_VERSION,
+)
 from ai_butler.domain.errors import ButlerError
 
 from .context import ButlerContext
 from .executor import RunExecutor
 from .shared import _row
 
-GRAPH_VERSION = "butler-graph-v2"
-PROMPT_BUNDLE_VERSION = "butler-prompts-v2"
-CAPABILITY_REGISTRY_VERSION = "1.0"
+GRAPH_VERSION = CURRENT_GRAPH_VERSION
+PROMPT_BUNDLE_VERSION = CURRENT_PROMPT_BUNDLE_VERSION
 
 
 class ButlerGraphState(TypedDict, total=False):
@@ -38,6 +45,8 @@ class ButlerGraphState(TypedDict, total=False):
     last_node: str
     awaiting: str | None
     resume: dict[str, Any] | None
+    intent: dict[str, Any]
+    resume_target: str | None
 
 
 class ButlerGraphRuntime:
@@ -46,7 +55,10 @@ class ButlerGraphRuntime:
     def __init__(self, context: ButlerContext, executor: RunExecutor) -> None:
         self.database = context.database
         self._database_url = context.settings.langgraph_database_url
-        self._execute_run = executor._execute_run
+        self._execute_legacy_run = executor._execute_legacy_run
+        self._route_v3_run = executor._route_v3_run
+        self._respond_v3_run = executor._respond_v3_run
+        self._execute_v3_run = executor._execute_v3_run
 
     async def run(self, run_id: UUID) -> None:
         facts = await self._load_run_facts(run_id)
@@ -63,12 +75,16 @@ class ButlerGraphRuntime:
             "configurable": {"thread_id": str(facts["thread_id"])},
             "metadata": {
                 "run_id": str(run_id),
-                "graph_version": GRAPH_VERSION,
-                "prompt_bundle_version": PROMPT_BUNDLE_VERSION,
+                "graph_version": str(facts["graph_version"]),
+                "prompt_bundle_version": str(facts["prompt_bundle_version"]),
             },
         }
+        if facts["graph_version"] == CURRENT_GRAPH_VERSION:
+            config["configurable"]["checkpoint_ns"] = CURRENT_GRAPH_VERSION
         async with AsyncPostgresSaver.from_conn_string(self._database_url) as checkpointer:
-            graph = self._build_graph().compile(checkpointer=checkpointer)
+            graph = self._build_graph(str(facts["graph_version"])).compile(
+                checkpointer=checkpointer
+            )
             if action == "START":
                 graph_input: ButlerGraphState | Command[Any] | None = {
                     "run_id": str(run_id),
@@ -91,7 +107,16 @@ class ButlerGraphRuntime:
         # ainvoke 正常返回表示 checkpoint 已确认本次输入（包括 interrupt checkpoint）。
         await self._acknowledge_action(run_id, action_key)
 
-    def _build_graph(self) -> StateGraph[ButlerGraphState]:
+    def _build_graph(
+        self, graph_version: str = LEGACY_GRAPH_VERSION
+    ) -> StateGraph[ButlerGraphState]:
+        """按 run 创建时版本选择图，避免新 Prompt 破坏旧 checkpoint 恢复。"""
+
+        if graph_version == CURRENT_GRAPH_VERSION:
+            return self._build_v3_graph()
+        return self._build_v2_graph()
+
+    def _build_v2_graph(self) -> StateGraph[ButlerGraphState]:
         builder = StateGraph(ButlerGraphState)
         for node_name in (
             "Initialize",
@@ -104,7 +129,7 @@ class ButlerGraphRuntime:
         ):
             builder.add_node(node_name, self._pass_node(node_name))
         builder.add_node("Approval", self._approval_node)
-        builder.add_node("Executor", self._executor_node)
+        builder.add_node("Executor", self._legacy_executor_node)
         builder.add_node("Feedback/Adjust", self._pass_node("Feedback/Adjust"))
         builder.add_node("Response", self._pass_node("Response"))
 
@@ -124,6 +149,59 @@ class ButlerGraphRuntime:
         )
         builder.add_edge("Feedback/Adjust", "Response")
         builder.add_edge("Response", END)
+        return builder
+
+    def _build_v3_graph(self) -> StateGraph[ButlerGraphState]:
+        """构建真实意图驱动的 v3 图；业务副作用仍集中在受控应用服务。"""
+
+        builder = StateGraph(ButlerGraphState)
+        builder.add_node("Initialize", self._pass_node("Initialize"))
+        builder.add_node("Router", self._v3_router_node)
+        for node_name in ("Profile", "Research", "Planner", "Review", "Evidence Gate"):
+            builder.add_node(node_name, self._pass_node(node_name))
+        builder.add_node("Approval", self._approval_node)
+        builder.add_node("Executor", self._v3_executor_node)
+        builder.add_node("Feedback/Adjust", self._pass_node("Feedback/Adjust"))
+        builder.add_node("Response", self._v3_response_node)
+
+        builder.add_edge(START, "Initialize")
+        builder.add_edge("Initialize", "Router")
+        builder.add_conditional_edges(
+            "Router",
+            self._route_after_v3_router,
+            {
+                "response": "Response",
+                "plan": "Profile",
+                "research": "Research",
+                "feedback": "Feedback/Adjust",
+                "execute": "Executor",
+            },
+        )
+        builder.add_edge("Profile", "Research")
+        builder.add_conditional_edges(
+            "Research",
+            self._route_after_v3_research,
+            {"planner": "Planner", "execute": "Executor"},
+        )
+        builder.add_edge("Planner", "Review")
+        builder.add_edge("Review", "Evidence Gate")
+        builder.add_edge("Evidence Gate", "Executor")
+        builder.add_edge("Feedback/Adjust", "Executor")
+        builder.add_conditional_edges(
+            "Executor",
+            self._route_after_v3_terminal,
+            {"approval": "Approval", "end": END},
+        )
+        builder.add_conditional_edges(
+            "Response",
+            self._route_after_v3_terminal,
+            {"approval": "Approval", "end": END},
+        )
+        builder.add_conditional_edges(
+            "Approval",
+            self._route_after_v3_approval,
+            {"router": "Router", "executor": "Executor"},
+        )
         return builder
 
     def _pass_node(self, node_name: str) -> Any:
@@ -155,12 +233,12 @@ class ButlerGraphRuntime:
             "action_key": action_key,
         }
 
-    async def _executor_node(self, state: ButlerGraphState) -> ButlerGraphState:
+    async def _legacy_executor_node(self, state: ButlerGraphState) -> ButlerGraphState:
         run_id = UUID(state["run_id"])
         started = time.monotonic()
         await self._mark_node(run_id, "Executor", "RUNNING", None)
         try:
-            await self._execute_run(run_id)
+            await self._execute_legacy_run(run_id)
         except Exception:
             await self._mark_node(
                 run_id,
@@ -184,11 +262,112 @@ class ButlerGraphRuntime:
         awaiting = str(status) if status in {"AWAITING_INPUT", "AWAITING_APPROVAL"} else None
         return {"last_node": "Executor", "awaiting": awaiting}
 
+    async def _v3_router_node(self, state: ButlerGraphState) -> ButlerGraphState:
+        """调用运行内真实 Router；其结构化结果进入 checkpoint 但不含用户正文。"""
+
+        run_id = UUID(state["run_id"])
+        started = time.monotonic()
+        await self._mark_node(run_id, "Router", "RUNNING", None)
+        decision = await self._route_v3_run(run_id)
+        await self._mark_node(
+            run_id,
+            "Router",
+            "SUCCEEDED",
+            int((time.monotonic() - started) * 1000),
+        )
+        return {
+            "last_node": "Router",
+            "intent": decision.model_dump(mode="json"),
+            "awaiting": None,
+            "resume_target": None,
+        }
+
+    async def _v3_response_node(self, state: ButlerGraphState) -> ButlerGraphState:
+        """生成无副作用回答；普通聊天使用真实 Token 流。"""
+
+        run_id = UUID(state["run_id"])
+        decision = IntentDecisionV1.model_validate(state["intent"])
+        started = time.monotonic()
+        await self._mark_node(run_id, "Response", "RUNNING", None)
+        await self._respond_v3_run(run_id, decision)
+        await self._mark_node(
+            run_id,
+            "Response",
+            "SUCCEEDED",
+            int((time.monotonic() - started) * 1000),
+        )
+        awaiting = await self._awaiting_status(run_id)
+        return {
+            "last_node": "Response",
+            "awaiting": awaiting,
+            "resume_target": "Router" if awaiting == "AWAITING_INPUT" else None,
+        }
+
+    async def _v3_executor_node(self, state: ButlerGraphState) -> ButlerGraphState:
+        """执行受控领域分支；模型不能绕过应用层审批和所有权校验。"""
+
+        run_id = UUID(state["run_id"])
+        decision = IntentDecisionV1.model_validate(state["intent"])
+        started = time.monotonic()
+        await self._mark_node(run_id, "Executor", "RUNNING", None)
+        await self._execute_v3_run(run_id, decision)
+        await self._mark_node(
+            run_id,
+            "Executor",
+            "SUCCEEDED",
+            int((time.monotonic() - started) * 1000),
+        )
+        awaiting = await self._awaiting_status(run_id)
+        return {
+            "last_node": "Executor",
+            "awaiting": awaiting,
+            "resume_target": "Executor" if awaiting is not None else None,
+        }
+
+    async def _awaiting_status(self, run_id: UUID) -> str | None:
+        async with self.database.connect() as connection:
+            status = (
+                await connection.execute(
+                    text("SELECT status FROM agent_runs WHERE id=:id"), {"id": run_id}
+                )
+            ).scalar_one_or_none()
+        return str(status) if status in {"AWAITING_INPUT", "AWAITING_APPROVAL"} else None
+
     @staticmethod
     def _route_after_executor(state: ButlerGraphState) -> str:
         if state.get("awaiting") is not None:
             return "approval"
         return "response"
+
+    @staticmethod
+    def _route_after_v3_router(state: ButlerGraphState) -> str:
+        decision = IntentDecisionV1.model_validate(state["intent"])
+        if decision.intent in {"CLARIFY", "UNSUPPORTED"}:
+            return "response"
+        if decision.intent in {"GENERAL_CHAT", "CIVIL_QA"} and not (
+            decision.needs_web or decision.needs_private_knowledge
+        ):
+            return "response"
+        if decision.intent in {"PLAN_CREATE", "PLAN_ADJUST"}:
+            return "plan"
+        if decision.intent == "TASK_FEEDBACK":
+            return "feedback"
+        if decision.intent in {"GENERAL_CHAT", "CIVIL_QA"}:
+            return "research"
+        return "execute"
+
+    @staticmethod
+    def _route_after_v3_research(state: ButlerGraphState) -> str:
+        decision = IntentDecisionV1.model_validate(state["intent"])
+        return "planner" if decision.intent in {"PLAN_CREATE", "PLAN_ADJUST"} else "execute"
+
+    @staticmethod
+    def _route_after_v3_terminal(state: ButlerGraphState) -> str:
+        return "approval" if state.get("awaiting") is not None else "end"
+
+    @staticmethod
+    def _route_after_v3_approval(state: ButlerGraphState) -> str:
+        return "router" if state.get("resume_target") == "Router" else "executor"
 
     async def _load_run_facts(self, run_id: UUID) -> dict[str, Any]:
         async with self.database.connect() as connection:
@@ -207,13 +386,16 @@ class ButlerGraphRuntime:
 
     @staticmethod
     def _validate_versions(facts: dict[str, Any]) -> None:
-        expected = (
-            ("graph_version", GRAPH_VERSION),
-            ("prompt_bundle_version", PROMPT_BUNDLE_VERSION),
-            ("capability_registry_version", CAPABILITY_REGISTRY_VERSION),
-            ("capability_registry_fingerprint", DEFAULT_CAPABILITY_REGISTRY.fingerprint),
-        )
-        if any(str(facts[field]) != value for field, value in expected):
+        supported = {
+            (LEGACY_GRAPH_VERSION, LEGACY_PROMPT_BUNDLE_VERSION),
+            (CURRENT_GRAPH_VERSION, CURRENT_PROMPT_BUNDLE_VERSION),
+        }
+        if (
+            (str(facts["graph_version"]), str(facts["prompt_bundle_version"])) not in supported
+            or str(facts["capability_registry_version"]) != CAPABILITY_REGISTRY_VERSION
+            or str(facts["capability_registry_fingerprint"])
+            != DEFAULT_CAPABILITY_REGISTRY.fingerprint
+        ):
             raise ButlerError("RUN_VERSION_UNAVAILABLE", "运行创建时版本当前不可恢复", 409)
 
     async def _validate_resume(

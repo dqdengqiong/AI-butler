@@ -1,6 +1,8 @@
 # AI个人管家 Agent 流程与 Prompt 设计文档 V3.0
 
-> 当前实现固定 `butler-graph-v2`、`butler-prompts-v2`、capability registry 版本及 fingerprint 到每个 run；等待输入、审批和重试均使用创建时版本恢复。
+> 新 run 固定 `butler-graph-v3`、`butler-prompts-v3`、capability registry 版本及 fingerprint；等待输入、审批和重试均使用创建时版本恢复。`butler-graph-v2` 只为尚未终态的历史 run 保留。
+
+v3 中会话提交前的模型只负责 `topic_router`，运行内 `intent_router` 决定八类业务意图。普通回答走真实 `response` 流；检索、计划和排期先生成严格结构化结果并经代码校验，再公开内容。模型不能生成或选择数据库 ID，也不能绕过用户所有权、审批、容量或幂等校验。
 
 ## 1. 设计目标
 

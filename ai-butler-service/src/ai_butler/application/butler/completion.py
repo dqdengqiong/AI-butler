@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import hashlib
+import time
+from collections.abc import AsyncIterator
 from typing import Any
 from uuid import UUID, uuid4
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from ai_butler.adapters.llm import ModelStreamEvent
 from ai_butler.agent.evidence import estimate_tokens
 from ai_butler.domain.errors import ButlerError
 
@@ -69,6 +72,131 @@ class CompletionService:
             run["attempt"],
         )
         await self._maybe_archive_segment(connection, run)
+
+    async def _complete_validated_run(
+        self,
+        connection: AsyncConnection,
+        run: dict[str, Any],
+        response: str,
+        *,
+        cards: list[dict[str, object]] | None = None,
+    ) -> None:
+        """对已完整校验的内容补齐可重放的 start/delta/completed 契约。"""
+
+        await connection.execute(
+            text("UPDATE messages SET status='STREAMING',content='' WHERE id=:id"),
+            {"id": run["pending_response_message_id"]},
+        )
+        await self._append_event(
+            connection,
+            run["id"],
+            run["user_id"],
+            "message.start",
+            {"message_id": str(run["pending_response_message_id"])},
+            run["attempt"],
+        )
+        for offset in range(0, len(response), 128):
+            await self._append_event(
+                connection,
+                run["id"],
+                run["user_id"],
+                "message.delta",
+                {"delta": response[offset : offset + 128]},
+                run["attempt"],
+            )
+        await self._complete_run(connection, run, response, cards=cards)
+
+    async def _stream_complete_run(
+        self,
+        run_id: UUID,
+        stream: AsyncIterator[ModelStreamEvent],
+    ) -> None:
+        """以短事务持久化公开文本流，并用最终完整消息覆盖临时增量。
+
+        模型网络等待期间不持有数据库事务。Delta 只进入可重放事件，Assistant
+        正文在完整流成功后一次写入；主备切换的 ``reset`` 会清空本次内存缓冲并
+        通知客户端，因而不会把两个模型的部分回答拼接。
+        """
+
+        async with self.database.transaction() as connection:
+            run = _row(
+                await connection.execute(
+                    text("SELECT * FROM agent_runs WHERE id=:id FOR UPDATE"), {"id": run_id}
+                )
+            )
+            if run is None or run["status"] != "RUNNING":
+                return
+            await connection.execute(
+                text(
+                    "UPDATE messages SET status='STREAMING',content='',updated_at=now() "
+                    "WHERE id=:id"
+                ),
+                {"id": run["pending_response_message_id"]},
+            )
+            await self._append_event(
+                connection,
+                run_id,
+                run["user_id"],
+                "message.start",
+                {"message_id": str(run["pending_response_message_id"])},
+                run["attempt"],
+            )
+
+        complete_text = ""
+        pending_delta = ""
+        last_flush = time.monotonic()
+        async for event in stream:
+            if event.reset:
+                complete_text = ""
+                pending_delta = ""
+                await self._append_stream_event(run_id, "message.reset", {})
+                continue
+            if event.delta:
+                complete_text += event.delta
+                pending_delta += event.delta
+                if len(pending_delta) >= 128 or time.monotonic() - last_flush >= 0.1:
+                    await self._append_stream_event(
+                        run_id, "message.delta", {"delta": pending_delta}
+                    )
+                    pending_delta = ""
+                    last_flush = time.monotonic()
+        if pending_delta:
+            await self._append_stream_event(run_id, "message.delta", {"delta": pending_delta})
+        if not complete_text:
+            raise ButlerError("MODEL_EMPTY_RESPONSE", "模型没有生成可用回答", 502)
+
+        async with self.database.transaction() as connection:
+            run = _row(
+                await connection.execute(
+                    text("SELECT * FROM agent_runs WHERE id=:id FOR UPDATE"), {"id": run_id}
+                )
+            )
+            if run is None or run["status"] != "RUNNING":
+                return
+            await self._complete_run(connection, run, complete_text)
+
+    async def _append_stream_event(
+        self, run_id: UUID, event_type: str, payload: dict[str, object]
+    ) -> None:
+        """写入单个公开流事件，并在每个增量边界重新检查取消状态。"""
+
+        async with self.database.transaction() as connection:
+            run = _row(
+                await connection.execute(
+                    text("SELECT user_id,status,attempt FROM agent_runs WHERE id=:id FOR UPDATE"),
+                    {"id": run_id},
+                )
+            )
+            if run is None or run["status"] != "RUNNING":
+                raise ButlerError("RUN_CANCELLED", "运行已取消", 409)
+            await self._append_event(
+                connection,
+                run_id,
+                run["user_id"],
+                event_type,
+                payload,
+                run["attempt"],
+            )
 
     async def _fail_run(self, run_id: UUID, error: ButlerError) -> None:
         async with self.database.transaction() as connection:

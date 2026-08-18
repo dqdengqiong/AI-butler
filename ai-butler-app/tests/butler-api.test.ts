@@ -30,6 +30,7 @@ describe('business API facade', () => {
       butlerApi.sendMessage({} as never, token),
       butlerApi.run('run/id', token),
       butlerApi.cancelRun('run/id', token),
+      butlerApi.retryRun('run/id', {} as never, token),
       butlerApi.streamTicket('run/id', token),
       butlerApi.approve('approval/id', {} as never, token),
       butlerApi.preferences(token),
@@ -59,6 +60,9 @@ describe('business API facade', () => {
     )
     expect(requestMock).toHaveBeenCalledWith(
       expect.objectContaining({ path: '/v1/messages', method: 'POST' }),
+    )
+    expect(requestMock).toHaveBeenCalledWith(
+      expect.objectContaining({ path: '/v1/agent-runs/run%2Fid/retry', method: 'POST' }),
     )
     expect(requestMock).toHaveBeenCalledWith(
       expect.objectContaining({

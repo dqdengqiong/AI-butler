@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -17,27 +18,49 @@ from ai_butler.adapters.llm import (
     ModelTask,
     ModelTimeoutError,
 )
-from ai_butler.adapters.model_routing import load_model_routing
+from ai_butler.adapters.model_routing import ModelRoutingConfig, load_model_routing
 from ai_butler.config import Settings
 
 ROUTING_FILE = Path(__file__).parents[2] / "model-routing.toml"
 
 
-def test_fixed_dual_model_routes_and_embedding_load() -> None:
+def _routing_with_doubao(*, referenced: bool = True) -> ModelRoutingConfig:
+    payload = tomllib.loads(ROUTING_FILE.read_text(encoding="utf-8"))
+    payload["models"]["doubao_turbo"] = {
+        "provider": "doubao",
+        "model": "doubao-seed-2-1-turbo-260628",
+        "protocol": "openai_responses",
+        "structured_output": True,
+        "multimodal": True,
+        "tools": True,
+        "context_window_tokens": 256000,
+    }
+    if referenced:
+        payload["routes"]["availability"]["fallbacks"] = ["doubao_turbo"]
+    return ModelRoutingConfig.model_validate(payload)
+
+
+def test_qwen_only_routes_and_embedding_load() -> None:
     routing = load_model_routing(ROUTING_FILE, "production")
 
     assert set(routing.providers) == {"qwen", "doubao"}
+    assert set(routing.models) == {"qwen_balanced"}
     assert routing.models["qwen_balanced"].model == "qwen3.7-plus-2026-05-26"
-    assert routing.models["doubao_turbo"].model == "doubao-seed-2-1-turbo-260628"
-    assert routing.routes["availability"].fallbacks == ("doubao_turbo",)
-    assert routing.routes["multimodal"].primary == "doubao_turbo"
+    assert all(not route.fallbacks for route in routing.routes.values())
+    assert routing.routes["multimodal"].primary == "qwen_balanced"
+    assert routing.routes["planner"].timeout_ms == 45_000
+    assert routing.routes["planner"].max_output_tokens == 4096
+    assert routing.routes["planner"].thinking.value == "disabled"
+    assert routing.routes["executor"].timeout_ms == 45_000
+    assert routing.routes["executor"].max_output_tokens == 4096
+    assert routing.routes["executor"].thinking.value == "disabled"
     assert routing.embedding.model == "text-embedding-v4"
     assert routing.embedding.dimensions == 1024
 
 
 def test_shadow_mode_is_explicit_and_never_allowed_in_production() -> None:
     with pytest.raises(ValidationError, match="requires real model routing"):
-        Settings(model_shadow_mode=True)
+        Settings(model_routing_enabled=False, model_shadow_mode=True)
     with pytest.raises(ValidationError, match="evaluation environments"):
         Settings(
             app_env="production",
@@ -46,28 +69,40 @@ def test_shadow_mode_is_explicit_and_never_allowed_in_production() -> None:
         )
 
 
-def test_non_production_may_omit_fallback_but_production_may_not(tmp_path: Path) -> None:
-    content = ROUTING_FILE.read_text(encoding="utf-8").replace(
-        'fallbacks = ["doubao_turbo"]', "fallbacks = []", 1
-    )
-    path = tmp_path / "routing.toml"
-    path.write_text(content, encoding="utf-8")
+def test_model_api_key_placeholder_is_rejected_before_provider_call() -> None:
+    with pytest.raises(ValidationError, match="ASCII"):
+        Settings(model_api_keys={"doubao": "请填写真实密钥"})
 
-    load_model_routing(path, "test")
+
+def test_production_requires_real_search_provider() -> None:
+    with pytest.raises(ValidationError, match="Tavily"):
+        Settings(app_env="production")
+    with pytest.raises(ValidationError, match="API key"):
+        Settings(search_provider="tavily")
+
+
+def test_production_requires_fallback_only_when_multiple_model_providers_exist() -> None:
+    routing = _routing_with_doubao()
+
+    routing.validate_for_environment("test")
     with pytest.raises(ValueError, match="exactly one fallback"):
-        load_model_routing(path, "production")
+        routing.validate_for_environment("production")
 
 
 @pytest.mark.parametrize(
     "mutate",
     [
         lambda value: value.replace(
-            'fallbacks = ["doubao_turbo"]',
-            'fallbacks = ["doubao_turbo", "qwen_balanced"]',
+            "fallbacks = []",
+            'fallbacks = ["qwen_balanced"]',
             1,
         ),
-        lambda value: value.replace('provider = "doubao"', 'provider = "qwen"', 1),
-        lambda value: value.replace("multimodal = true", "multimodal = false", 2),
+        lambda value: value.replace(
+            'provider = "qwen"\nmodel = "qwen3.7-plus-2026-05-26"',
+            'provider = "missing"\nmodel = "qwen3.7-plus-2026-05-26"',
+            1,
+        ),
+        lambda value: value.replace("multimodal = true", "multimodal = false", 1),
         lambda value: value.replace(
             'model = "qwen3.7-plus-2026-05-26"',
             'model = "qwen3.7-plus-2026-05-26"\nprice_as_of = "2026-08-17"',
@@ -75,12 +110,12 @@ def test_non_production_may_omit_fallback_but_production_may_not(tmp_path: Path)
         ),
     ],
 )
-def test_invalid_fallback_capability_and_price_fields_fail(tmp_path: Path, mutate: object) -> None:
+def test_invalid_reference_capability_and_price_fields_fail(tmp_path: Path, mutate: object) -> None:
     assert callable(mutate)
     path = tmp_path / "invalid.toml"
     path.write_text(mutate(ROUTING_FILE.read_text(encoding="utf-8")), encoding="utf-8")  # type: ignore[operator]
     with pytest.raises((ValueError, ValidationError)):
-        load_model_routing(path, "production")
+        load_model_routing(path, "test")
 
 
 class _Recorder:
@@ -129,7 +164,7 @@ def _gateway(
     monkeypatch.setattr("ai_butler.adapters.llm.OpenAICompatibleLLM", factory)
     recorder = _Recorder()
     gateway = ModelGateway(
-        load_model_routing(ROUTING_FILE, "test"),
+        _routing_with_doubao(),
         {"qwen": "key", "doubao": "key"},
         recorder,
         shadow_mode=shadow_mode,
@@ -137,16 +172,32 @@ def _gateway(
     return gateway, clients, recorder
 
 
-def test_gateway_requires_both_provider_keys(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_gateway_requires_keys_for_referenced_models(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         "ai_butler.adapters.llm.OpenAICompatibleLLM",
         lambda *_args: _Client("unused", []),
     )
     with pytest.raises(ValueError, match="doubao"):
         ModelGateway(
-            load_model_routing(ROUTING_FILE, "test"),
+            _routing_with_doubao(),
             {"qwen": "key"},
         )
+
+
+def test_gateway_ignores_unreferenced_model_without_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    initialized: list[str] = []
+
+    def factory(_key: str, _url: str, alias: str, _profile: object) -> _Client:
+        initialized.append(alias)
+        return _Client(alias, [])
+
+    monkeypatch.setattr("ai_butler.adapters.llm.OpenAICompatibleLLM", factory)
+
+    ModelGateway(_routing_with_doubao(referenced=False), {"qwen": "key"})
+
+    assert initialized == ["qwen_balanced"]
 
 
 async def test_primary_success_never_calls_fallback(monkeypatch: pytest.MonkeyPatch) -> None:

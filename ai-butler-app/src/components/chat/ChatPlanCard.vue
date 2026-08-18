@@ -34,6 +34,9 @@ defineEmits<{
         ><text>{{ plan.title }}</text
         ><text>每周 {{ Math.round(plan.weeklyMinutes / 6) / 10 }} 小时</text></view
       >
+      <text v-if="plan.startDate && plan.endDate" class="plan-period">
+        {{ plan.startDate }} 至 {{ plan.endDate }}
+      </text>
       <text class="plan-note">{{ plan.description }}</text>
     </view>
     <text v-for="warning in item.warnings" :key="warning" class="plan-warning">{{ warning }}</text>
@@ -120,6 +123,13 @@ defineEmits<{
   font-size: 19rpx;
   line-height: 1.55;
   border-top: 1px solid #e6e2ed;
+}
+.plan-period {
+  display: block;
+  margin-bottom: 12rpx;
+  color: #6556e8;
+  font-size: 19rpx;
+  font-weight: 650;
 }
 .card-actions {
   display: flex;

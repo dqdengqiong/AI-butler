@@ -1073,6 +1073,18 @@
       },
       "PlanCardPlanV11": {
         "properties": {
+          "end_date": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "End Date"
+          },
           "objective_summary": {
             "title": "Objective Summary",
             "type": "string"
@@ -1086,6 +1098,18 @@
             "format": "uuid",
             "title": "Plan Revision Id",
             "type": "string"
+          },
+          "start_date": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Start Date"
           },
           "title": {
             "title": "Title",

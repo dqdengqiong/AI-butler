@@ -10,6 +10,7 @@ const api = vi.hoisted(() => ({
   sendMessage: vi.fn(),
   run: vi.fn(),
   cancelRun: vi.fn(),
+  retryRun: vi.fn(),
   approve: vi.fn(),
   streamTicket: vi.fn(),
   executeTask: vi.fn(),
@@ -171,6 +172,7 @@ describe('server-fact butler store', () => {
     })
     api.run.mockReset().mockResolvedValue({ status: 'SUCCEEDED' })
     api.cancelRun.mockReset().mockResolvedValue({ status: 'CANCELLED' })
+    api.retryRun.mockReset().mockResolvedValue({ status: 'QUEUED', attempt: 1 })
     api.approve.mockReset().mockResolvedValue({ run_id: 'run-2' })
     api.streamTicket.mockReset().mockResolvedValue({
       events_url: '/v1/events-2',
@@ -237,15 +239,165 @@ describe('server-fact butler store', () => {
       kind: 'status',
       title: '正在整理引用',
     })
-    await onEvent({ event: 'message.delta', payload: { delta: '增量' } })
+    await onEvent({
+      event: 'message.start',
+      runId: 'run-1',
+      payload: { message_id: 'stream-assistant' },
+    })
+    await onEvent({ event: 'message.delta', runId: 'run-1', payload: { delta: '增量' } })
     expect(
-      store.chatItems.find((item) => item.kind === 'message' && item.role === 'assistant'),
-    ).toBeTruthy()
-    await onEvent({ event: 'message.reset', payload: {} })
-    await onEvent({ event: 'message.completed', payload: {} })
-    await onEvent({ event: 'run.completed', payload: {} })
+      store.chatItems.find(
+        (item) => item.kind === 'message' && item.messageId === 'stream-assistant',
+      ),
+    ).toMatchObject({ content: '增量' })
+    await onEvent({ event: 'message.reset', runId: 'run-1', payload: {} })
+    await onEvent({ event: 'message.completed', runId: 'run-1', payload: {} })
+    await onEvent({ event: 'run.completed', runId: 'run-1', payload: {} })
     expect(store.activeRunId).toBeNull()
     expect(api.dashboard).toHaveBeenCalledTimes(2)
+  })
+
+  it('shows a terminal error instead of leaving the progress card spinning', async () => {
+    api.messages.mockResolvedValue({
+      items: [
+        { id: 'm-user', role: 'USER', content: '问题', cards: null },
+        { id: 'm-pending', role: 'ASSISTANT', content: '', cards: null },
+      ],
+    })
+    const store = useButlerStore()
+    await store.load('access')
+    await store.sendMessage('问题', 'access')
+    const onEvent = stream.options?.onEvent as (event: Record<string, unknown>) => Promise<void>
+
+    await onEvent({
+      event: 'progress',
+      runId: 'run-1',
+      payload: { code: 'GENERATING_ANSWER' },
+    })
+    await onEvent({
+      event: 'error',
+      runId: 'run-1',
+      attempt: 0,
+      payload: {
+        code: 'RAG_MODEL_UNAVAILABLE',
+        message: '回答生成暂时不可用，请稍后重试',
+        retryable: true,
+      },
+    })
+
+    expect(store.chatItems.at(-1)).toMatchObject({
+      kind: 'status',
+      state: 'error',
+      title: '暂时无法生成回答',
+      description: '回答生成暂时不可用，请稍后重试',
+      attempt: 0,
+      retryable: true,
+    })
+    expect(stream.close).toHaveBeenCalled()
+    expect(api.conversations).toHaveBeenCalledTimes(3)
+  })
+
+  it('retries a failed run with its expected attempt and reconnects the stream', async () => {
+    const store = useButlerStore()
+    await store.load('access')
+    await store.sendMessage('问题', 'access')
+    const onEvent = stream.options?.onEvent as (event: Record<string, unknown>) => Promise<void>
+    await onEvent({
+      event: 'error',
+      runId: 'run-1',
+      attempt: 0,
+      payload: { message: '暂时不可用', retryable: true },
+    })
+
+    await store.retryRun('run-1', 0, 'access')
+
+    expect(api.retryRun).toHaveBeenCalledWith(
+      'run-1',
+      {
+        schema_version: '1.0',
+        expected_attempt: 0,
+        execution_policy: 'REJECT',
+      },
+      'access',
+    )
+    expect(api.streamTicket).toHaveBeenCalledWith('run-1', 'access')
+    expect(store.chatItems.at(-1)).toMatchObject({
+      kind: 'status',
+      state: 'loading',
+      title: '正在重新生成',
+      runId: 'run-1',
+    })
+    expect(stream.options).toMatchObject({ runId: 'run-1', after: 3 })
+  })
+
+  it('reloads the attempt before retrying a legacy error card', async () => {
+    api.run.mockResolvedValue({
+      status: 'FAILED_RETRYABLE',
+      attempt: 2,
+      error: { code: 'MODEL_UNAVAILABLE', retryable: true },
+    })
+    const store = useButlerStore()
+    await store.load('access')
+
+    await store.retryRun('run-1', undefined, 'access')
+
+    expect(api.run).toHaveBeenCalledWith('run-1', 'access')
+    expect(api.retryRun).toHaveBeenCalledWith(
+      'run-1',
+      expect.objectContaining({ expected_attempt: 2 }),
+      'access',
+    )
+  })
+
+  it('restores a retryable error card after reloading the conversation', async () => {
+    api.conversations.mockResolvedValue({
+      ...conversations,
+      items: [
+        {
+          ...conversations.items[0],
+          active_run: { id: 'run-failed', status: 'FAILED_RETRYABLE' },
+        },
+      ],
+    })
+    api.run.mockResolvedValue({
+      status: 'FAILED_RETRYABLE',
+      attempt: 2,
+      error: { code: 'PLANNER_MODEL_UNAVAILABLE', retryable: true },
+    })
+    const store = useButlerStore()
+
+    await store.load('access')
+
+    expect(api.run).toHaveBeenCalledWith('run-failed', 'access')
+    expect(store.chatItems.at(-1)).toMatchObject({
+      kind: 'status',
+      state: 'error',
+      title: '计划生成超时',
+      description: '计划生成超时，本次未创建计划，可以重试。',
+      runId: 'run-failed',
+      attempt: 2,
+      retryable: true,
+    })
+  })
+
+  it('creates a run-scoped assistant projection when replay starts at a delta', async () => {
+    api.messages.mockResolvedValue({
+      items: [{ id: 'm-user', role: 'USER', content: '问题', cards: null }],
+    })
+    const store = useButlerStore()
+    await store.load('access')
+    await store.sendMessage('问题', 'access')
+    const onEvent = stream.options?.onEvent as (event: Record<string, unknown>) => Promise<void>
+
+    await onEvent({ event: 'message.delta', runId: 'run-1', payload: { delta: '第一段' } })
+    await onEvent({ event: 'message.delta', runId: 'run-1', payload: { delta: '第二段' } })
+
+    expect(store.chatItems.at(-1)).toMatchObject({
+      key: 'stream-message-run-1',
+      kind: 'message',
+      role: 'assistant',
+      content: '第一段第二段',
+    })
   })
 
   it('compensates a disconnected terminal run and replaces prior stream', async () => {

@@ -39,6 +39,7 @@ class EvidenceExecutionService:
         self.llm = context.llm
         self._append_event = events._append_event
         self._complete_run = completion._complete_run
+        self._complete_validated_run = completion._complete_validated_run
         self._ensure_synthetic_source = bootstrap._ensure_synthetic_source
 
     async def _generate_rag_answer(
@@ -159,7 +160,7 @@ class EvidenceExecutionService:
             raise ButlerError("RAG_MODEL_INVALID", "回答生成结果不可用", 502)
         response = self.evidence_gate.render(answer, evidence)
         source_card = await self._persist_rag_answer(connection, run, evidence, answer)
-        await self._complete_run(
+        await self._complete_validated_run(
             connection,
             run,
             response,

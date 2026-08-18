@@ -22,6 +22,7 @@ async def test_long_term_memory_and_private_vectors_are_deleted_across_stores(
     tmp_path: Path,
 ) -> None:
     settings = Settings(
+        model_routing_enabled=False,
         app_database_url="postgresql+psycopg://butler_test:butler_test@127.0.0.1:5432/butler_test",
         migration_database_url=(
             "postgresql+psycopg://butler_migrator:butler_migrator@127.0.0.1:5432/butler_test"

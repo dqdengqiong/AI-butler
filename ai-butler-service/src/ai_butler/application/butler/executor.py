@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import logging
 from uuid import UUID
 
 from sqlalchemy import text
 
+from ai_butler.adapters.embedding import EmbeddingProviderError
 from ai_butler.adapters.search import (
     SearchError,
     SearchRequest,
@@ -17,7 +19,20 @@ from ai_butler.agent.availability import (
     AvailabilityInterpretationV1,
     AvailabilityInterpreter,
 )
+from ai_butler.agent.contracts import (
+    ExecutorResultV1,
+    IntentDecisionV1,
+    PlannerResultV1,
+    PlanScopeV1,
+)
 from ai_butler.agent.evidence import estimate_tokens
+from ai_butler.agent.model_nodes import (
+    ExecutorNode,
+    FeedbackAdjustNode,
+    IntentRouterNode,
+    ResponseNode,
+)
+from ai_butler.agent.planning_nodes import DeterministicPlanReview, PlannerNode
 from ai_butler.domain.errors import ButlerError
 
 from .completion import CompletionService
@@ -26,6 +41,8 @@ from .evidence_execution import EvidenceExecutionService
 from .interrupts import InterruptionService
 from .memory import LongTermMemoryService
 from .plan_execution import PlanExecutionService
+from .plan_scope_flow import PlanScopeFlowService
+from .private_retrieval import PrivateEvidenceRetriever
 from .shared import (
     PLAN_ACTION_PATTERN,
     PLAN_PATTERN,
@@ -35,6 +52,9 @@ from .shared import (
     WEB_FORCE_PATTERN,
     _row,
 )
+from .v3_executor import V3RunExecutorService
+
+logger = logging.getLogger(__name__)
 
 
 class RunExecutor:
@@ -62,15 +82,63 @@ class RunExecutor:
         self._interrupt_for_availability_clarification = (
             interrupts._interrupt_for_availability_clarification
         )
-        self._create_plan_draft = planning._create_plan_draft
+        self._interrupt_for_clarification = interrupts._interrupt_for_clarification
+        self._create_model_plan_draft = planning._create_model_plan_draft
         self._regenerate_approval = planning._regenerate_approval
         self._materialize_approval = planning._materialize_approval
+        self._materialize_model_approval = planning._materialize_model_approval
         self._complete_rag_run = evidence._complete_rag_run
         self._generate_rag_answer = evidence._generate_rag_answer
         self._complete_run = completion._complete_run
+        self._stream_complete_run = completion._stream_complete_run
         self._memory = LongTermMemoryService(context)
+        self._intent_router = IntentRouterNode(context.llm)
+        self._planner_node = PlannerNode(context.llm)
+        self._plan_review = DeterministicPlanReview()
+        self._executor_node = ExecutorNode(context.llm)
+        self._feedback_adjust_node = FeedbackAdjustNode(context.llm)
+        self._response_node = ResponseNode(context.llm)
+        self._v3 = V3RunExecutorService(self)
+        self._private_retriever = PrivateEvidenceRetriever(context)
+        self._plan_scope_flow = PlanScopeFlowService(context, interrupts)
 
-    async def _execute_run(self, run_id: UUID) -> None:
+    async def _route_v3_run(self, run_id: UUID) -> IntentDecisionV1:
+        return await self._v3._route_v3_run(run_id)
+
+    async def _respond_v3_run(self, run_id: UUID, decision: IntentDecisionV1) -> None:
+        await self._v3._respond_v3_run(run_id, decision)
+
+    async def _execute_v3_run(self, run_id: UUID, decision: IntentDecisionV1) -> None:
+        await self._v3._execute_v3_run(run_id, decision)
+
+    async def _approved_model_schedules(
+        self, run_id: UUID
+    ) -> tuple[UUID, dict[UUID, ExecutorResultV1]] | None:
+        return await self._v3._approved_model_schedules(run_id)
+
+    async def _retrieve_private_evidence(
+        self,
+        user_id: UUID,
+        query: str,
+        allowed_file_ids: tuple[UUID, ...],
+    ) -> tuple[SearchResult, ...]:
+        return await self._private_retriever._retrieve_private_evidence(
+            user_id, query, allowed_file_ids
+        )
+
+    async def _execute_legacy_run(self, run_id: UUID) -> None:
+        """保持 v2 checkpoint 的正则分支语义，直到旧 run 全部进入终态。"""
+
+        await self._execute_domain_run(run_id)
+
+    async def _execute_domain_run(
+        self,
+        run_id: UUID,
+        *,
+        forced_intent: str | None = None,
+        needs_web_override: bool | None = None,
+        needs_private_override: bool | None = None,
+    ) -> None:
         """在事务外完成联网检索，再用短事务原子写入回答与引用。
 
         run 领取和最终持久化分别加锁；搜索期间用户可能请求取消，因此写入前
@@ -134,12 +202,27 @@ class RunExecutor:
                     await self._complete_run(connection, run, memory_command.response)
             return
 
+        model_schedules: tuple[UUID, dict[UUID, ExecutorResultV1]] | None = None
+        if forced_intent is not None and snapshot["pending_action"] == "APPROVAL_RESUME":
+            await self._emit_progress(snapshot, "SCHEDULING_TASKS")
+            model_schedules = await self._approved_model_schedules(run_id)
+
         raw_results: tuple[SearchResult, ...] = ()
-        is_plan = bool(PLAN_PATTERN.search(content) and PLAN_ACTION_PATTERN.search(content))
+        is_plan = (
+            forced_intent in {"PLAN_CREATE", "PLAN_ADJUST"}
+            if forced_intent is not None
+            else bool(PLAN_PATTERN.search(content) and PLAN_ACTION_PATTERN.search(content))
+        )
         availability_candidate: AvailabilityInterpretationV1 | None = None
         confirmed_availability: AvailabilityInterpretationV1 | None = None
+        plan_scope: PlanScopeV1 | None = None
         revise_availability = False
         if is_plan and snapshot["pending_action"] != "APPROVAL_RESUME":
+            output_state = snapshot.get("output_data")
+            output_state = output_state if isinstance(output_state, dict) else {}
+            has_plan_scope_state = bool(
+                output_state.get("plan_scope_draft") or output_state.get("plan_scope")
+            )
             phase = str(request_context.get("card_phase") or "")
             selected_options = request_context.get("selected_options")
             selected_option = (
@@ -178,41 +261,65 @@ class RunExecutor:
                         status="NEEDS_CLARIFICATION",
                         question="这个快捷选项暂时不可用，请直接描述你的学习时间。",
                     )
-            elif current_input and (
-                snapshot["pending_action"] == "INPUT_RESUME"
-                or bool(TIME_PATTERN.search(current_input))
+            elif (
+                not has_plan_scope_state
+                and current_input
+                and (
+                    snapshot["pending_action"] == "INPUT_RESUME"
+                    or bool(TIME_PATTERN.search(current_input))
+                )
             ):
                 availability_candidate = await self.availability_interpreter.interpret(
                     current_input,
                     run_id=run_id,
                 )
 
+            plan_scope = await self._plan_scope_flow.resolve(
+                run_id=run_id,
+                snapshot=snapshot,
+                objective=content,
+                current_input=current_input,
+                request_context=request_context,
+                availability_candidate=availability_candidate,
+                confirmed_availability=confirmed_availability,
+                revise_availability=revise_availability,
+            )
+            if plan_scope is None:
+                return
+            confirmed_availability = plan_scope.availability
+
         # 计划类请求先确认时间，再进行可能产生费用的检索；确认前不预取或缓存用户查询。
         can_retrieve = snapshot["pending_action"] != "APPROVAL_RESUME" and (
-            not is_plan or confirmed_availability is not None
+            not is_plan or plan_scope is not None
         )
-        plan_ready = is_plan and confirmed_availability is not None
+        plan_ready = is_plan and plan_scope is not None
+        inferred_private = bool(attachment_file_ids) or bool(PRIVATE_SEARCH_PATTERN.search(content))
         needs_private = can_retrieve and (
-            bool(attachment_file_ids) or bool(PRIVATE_SEARCH_PATTERN.search(content))
+            needs_private_override if needs_private_override is not None else inferred_private
         )
-        needs_web = can_retrieve and (
+        inferred_web = (
             plan_ready
             or bool(WEB_FORCE_PATTERN.search(content))
             or (bool(SEARCH_PATTERN.search(content)) and not attachment_file_ids)
         )
+        needs_web = can_retrieve and (
+            needs_web_override if needs_web_override is not None else inferred_web
+        )
         private_query = normalize_private_query(content) or "公务员备考资料"
         public_query = minimize_public_query(content) or "公务员备考资料"
         if needs_private:
+            await self._emit_progress(snapshot, "RESEARCHING")
             await self._emit_progress(snapshot, "RETRIEVING_PRIVATE")
             try:
                 raw_results += await self._retrieve_private_evidence(
                     UUID(str(snapshot["user_id"])), private_query, attachment_file_ids
                 )
-            except VectorStoreError as exc:
+            except (EmbeddingProviderError, VectorStoreError) as exc:
                 raise ButlerError(
                     "PRIVATE_RETRIEVAL_UNAVAILABLE", "我的资料暂时无法检索，请稍后重试", 503, True
                 ) from exc
         if needs_web:
+            await self._emit_progress(snapshot, "RESEARCHING")
             await self._emit_progress(snapshot, "SEARCHING_WEB")
             try:
                 results = await self.search_provider.search(
@@ -250,6 +357,63 @@ class RunExecutor:
         if needs_search and not is_plan and evidence:
             await self._emit_progress(snapshot, "GENERATING_ANSWER")
             rag_answer = await self._generate_rag_answer(content, evidence, run_id=run_id)
+
+        planner_result: PlannerResultV1 | None = None
+        if plan_ready and confirmed_availability is not None and plan_scope is not None:
+            await self._emit_progress(snapshot, "BUILDING_PLAN")
+            async with self.database.connect() as connection:
+                existing = _row(
+                    await connection.execute(
+                        text(
+                            "SELECT title,status,current_revision_id FROM plans "
+                            "WHERE user_id=:user_id AND status='ACTIVE' "
+                            "ORDER BY updated_at DESC LIMIT 1"
+                        ),
+                        {"user_id": snapshot["user_id"]},
+                    )
+                )
+            existing_plan = (
+                {
+                    "title": str(existing["title"]),
+                    "status": str(existing["status"]),
+                    "has_published_revision": existing["current_revision_id"] is not None,
+                }
+                if existing is not None and forced_intent == "PLAN_ADJUST"
+                else None
+            )
+            verified_claims: tuple[dict[str, object], ...] = tuple(
+                {
+                    "claim_key": item.result.evidence_ref,
+                    "text": item.result.content,
+                    "source_level": item.source_level,
+                }
+                for item in evidence
+            )
+            available_weekly = int(confirmed_availability.weekly_minutes or 0)
+            plan_intent = forced_intent or "PLAN_CREATE"
+            if plan_intent == "PLAN_ADJUST" and existing is None:
+                planner_result = PlannerResultV1(
+                    status="NEEDS_INPUT",
+                    question="当前没有生效计划可调整。你希望创建一个新计划吗？",
+                )
+            else:
+                planner_result = await self._planner_node.plan(
+                    objective=content,
+                    weekly_minutes=max(1, int(available_weekly * 0.85)),
+                    availability=confirmed_availability.model_dump(mode="json"),
+                    verified_claims=verified_claims,
+                    plan_scope=plan_scope,
+                    existing_plan=existing_plan,
+                    run_id=run_id,
+                )
+            await self._emit_progress(snapshot, "REVIEWING_PLAN")
+            self._plan_review.validate(
+                planner_result,
+                available_weekly_minutes=available_weekly,
+                allowed_claim_keys=(item.result.evidence_ref for item in evidence),
+                expected_start_date=plan_scope.start_date,
+                expected_end_date=plan_scope.target_date,
+            )
 
         async with self.database.transaction() as connection:
             run = _row(
@@ -302,26 +466,55 @@ class RunExecutor:
                     await self._regenerate_approval(connection, run, approval)
                     return
                 if action == "APPROVE" and approval:
-                    await self._materialize_approval(
-                        connection, UUID(str(run["user_id"])), UUID(str(approval["id"]))
-                    )
+                    if forced_intent is not None:
+                        if model_schedules is None:
+                            raise ButlerError("EXECUTOR_MODEL_INVALID", "批准后的任务排期缺失", 502)
+                        model_approval_id, schedules = model_schedules
+                        if model_approval_id != UUID(str(approval["id"])):
+                            raise ButlerError(
+                                "APPROVAL_VERSION_CONFLICT", "审批版本已更新，请重试", 409
+                            )
+                        await self._materialize_model_approval(
+                            connection,
+                            UUID(str(run["user_id"])),
+                            model_approval_id,
+                            schedules,
+                        )
+                    else:
+                        await self._materialize_approval(
+                            connection, UUID(str(run["user_id"])), UUID(str(approval["id"]))
+                        )
                 await self._complete_run(connection, run, response)
                 return
             if is_plan:
-                if confirmed_availability is not None:
-                    await self._create_plan_draft(
-                        connection, run, content, evidence, confirmed_availability
-                    )
-                elif revise_availability:
-                    await self._interrupt_for_availability_clarification(
-                        connection, run, "好的，请重新描述你的学习时间。"
-                    )
-                elif availability_candidate is not None:
-                    await self._interrupt_for_availability_confirmation(
-                        connection, run, availability_candidate
-                    )
+                if confirmed_availability is not None and plan_scope is not None:
+                    if planner_result is None:
+                        raise ButlerError("PLANNER_MODEL_INVALID", "计划草稿缺失", 502)
+                    if planner_result.status == "NEEDS_INPUT":
+                        await self._interrupt_for_clarification(
+                            connection,
+                            run,
+                            planner_result.question or "请补充计划目标。",
+                        )
+                    elif planner_result.status == "INFEASIBLE":
+                        options = "；".join(planner_result.adjustment_options)
+                        response = "当前条件下无法生成可执行计划。"
+                        if options:
+                            response += f"可以考虑：{options}。"
+                        await self._complete_run(connection, run, response)
+                    else:
+                        await self._create_model_plan_draft(
+                            connection,
+                            run,
+                            content,
+                            evidence,
+                            confirmed_availability,
+                            plan_scope,
+                            planner_result,
+                            intent=forced_intent or "PLAN_CREATE",
+                        )
                 else:
-                    await self._interrupt_for_input(connection, run)
+                    raise ButlerError("PLAN_SCOPE_MISSING", "计划范围尚未确认", 409)
                 return
             if needs_search:
                 await self._complete_rag_run(connection, run, evidence, rag_answer)
@@ -331,87 +524,3 @@ class RunExecutor:
                 run,
                 "我目前可以协助公务员备考规划、资料检索、任务跟进和计划调整。请告诉我目标考试与可投入时间。",
             )
-
-    async def _retrieve_private_evidence(
-        self,
-        user_id: UUID,
-        query: str,
-        allowed_file_ids: tuple[UUID, ...],
-    ) -> tuple[SearchResult, ...]:
-        """向量召回后重新读取 PostgreSQL 所有权事实，拒绝信任 Qdrant payload 授权。"""
-
-        document_ids: tuple[UUID, ...] = ()
-        if allowed_file_ids:
-            async with self.database.connect() as connection:
-                document_rows = (
-                    await connection.execute(
-                        text(
-                            "SELECT kd.id FROM knowledge_documents kd "
-                            "JOIN stored_files sf ON sf.id=kd.stored_file_id "
-                            "WHERE kd.owner_user_id=:user_id AND kd.stored_file_id=ANY(:file_ids) "
-                            "AND kd.visibility='PRIVATE' AND kd.ingestion_status='READY' "
-                            "AND sf.upload_status='VERIFIED' AND sf.scan_status='CLEAN'"
-                        ),
-                        {"user_id": user_id, "file_ids": list(allowed_file_ids)},
-                    )
-                ).all()
-            document_ids = tuple(UUID(str(row[0])) for row in document_rows)
-            if not document_ids:
-                return ()
-
-        vector = await self.embedding_provider.embed(query)
-        hits = await self.vector_store.search(
-            user_id,
-            vector,
-            self.settings.search_candidate_results,
-            document_ids,
-        )
-        if not hits:
-            return ()
-        hit_by_chunk = {hit.chunk_id: hit for hit in hits}
-        chunk_ids = tuple(hit_by_chunk)
-        parameters: dict[str, object] = {"user_id": user_id, "chunk_ids": list(chunk_ids)}
-        if allowed_file_ids:
-            parameters["file_ids"] = list(allowed_file_ids)
-            query_text = text(
-                "SELECT kc.id,kc.content,kd.id AS document_id,kd.title,kd.stored_file_id "
-                "FROM knowledge_chunks kc "
-                "JOIN knowledge_documents kd ON kd.id=kc.document_id "
-                "JOIN stored_files sf ON sf.id=kd.stored_file_id "
-                "WHERE kc.id=ANY(:chunk_ids) AND kd.owner_user_id=:user_id "
-                "AND kd.visibility='PRIVATE' AND kd.ingestion_status='READY' "
-                "AND sf.upload_status='VERIFIED' AND sf.scan_status='CLEAN' "
-                "AND kd.stored_file_id=ANY(:file_ids)"
-            )
-        else:
-            query_text = text(
-                "SELECT kc.id,kc.content,kd.id AS document_id,kd.title,kd.stored_file_id "
-                "FROM knowledge_chunks kc "
-                "JOIN knowledge_documents kd ON kd.id=kc.document_id "
-                "JOIN stored_files sf ON sf.id=kd.stored_file_id "
-                "WHERE kc.id=ANY(:chunk_ids) AND kd.owner_user_id=:user_id "
-                "AND kd.visibility='PRIVATE' AND kd.ingestion_status='READY' "
-                "AND sf.upload_status='VERIFIED' AND sf.scan_status='CLEAN'"
-            )
-        async with self.database.connect() as connection:
-            chunk_rows = (await connection.execute(query_text, parameters)).mappings().all()
-        by_id = {
-            UUID(str(row["id"])): row
-            for row in chunk_rows
-            if hit_by_chunk[UUID(str(row["id"]))].document_id == UUID(str(row["document_id"]))
-        }
-        return tuple(
-            SearchResult(
-                evidence_ref=f"private-{chunk_id}",
-                title=str(by_id[chunk_id]["title"]),
-                source_organization="我的资料",
-                content=str(by_id[chunk_id]["content"]),
-                score=hit_by_chunk[chunk_id].score,
-                url=None,
-                source_type="PRIVATE_FILE",
-                knowledge_chunk_id=chunk_id,
-                document_id=UUID(str(by_id[chunk_id]["document_id"])),
-            )
-            for chunk_id in chunk_ids
-            if chunk_id in by_id
-        )

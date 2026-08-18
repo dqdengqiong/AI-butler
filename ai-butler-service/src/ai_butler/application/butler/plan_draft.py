@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import re
-from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -11,6 +10,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from ai_butler.agent.availability import AvailabilityInterpretationV1
+from ai_butler.agent.contracts import PlanScopeV1
 from ai_butler.agent.evidence import NumberedEvidence
 from ai_butler.agent.runtime import DEFAULT_CAPABILITY_REGISTRY
 
@@ -39,6 +39,7 @@ class PlanDraftService:
         content: str,
         evidence: tuple[NumberedEvidence, ...],
         availability: AvailabilityInterpretationV1,
+        scope: PlanScopeV1,
     ) -> None:
         DEFAULT_CAPABILITY_REGISTRY.require("plan_draft_write", "Planner", approved=False)
         if any(item.result.source_type == "KNOWLEDGE" for item in evidence):
@@ -76,8 +77,8 @@ class PlanDraftService:
             if len(objectives) >= 2
             else "SINGLE_PLAN_CREATE"
         )
-        start = datetime.now(UTC).date()
-        end = start + timedelta(days=27)
+        start = scope.start_date
+        end = scope.target_date
         capacity = int((availability.weekly_minutes or 0) * 0.85)
         weekly_minutes = max(30, capacity // len(objectives))
         approval_id = uuid4()
@@ -97,10 +98,15 @@ class PlanDraftService:
                 title = safe_summary(objective)[:80] or f"备考计划 {index + 1}"
                 await connection.execute(
                     text(
-                        "INSERT INTO goals(id,user_id,goal_type,title,status) "
-                        "VALUES(:id,:user_id,'CIVIL_SERVICE_EXAM',:title,'DRAFT')"
+                        "INSERT INTO goals(id,user_id,goal_type,title,status,target_date) "
+                        "VALUES(:id,:user_id,'CIVIL_SERVICE_EXAM',:title,'DRAFT',:target_date)"
                     ),
-                    {"id": goal_id, "user_id": run["user_id"], "title": title},
+                    {
+                        "id": goal_id,
+                        "user_id": run["user_id"],
+                        "title": title,
+                        "target_date": scope.target_date,
+                    },
                 )
                 await connection.execute(
                     text(
@@ -117,6 +123,17 @@ class PlanDraftService:
             else:
                 plan_id = existing_plan["id"]
                 expected_revision = existing_plan["current_revision_id"]
+                await connection.execute(
+                    text(
+                        "UPDATE goals SET target_date=:target_date,updated_at=now() "
+                        "WHERE id=:goal_id AND user_id=:user_id"
+                    ),
+                    {
+                        "target_date": scope.target_date,
+                        "goal_id": existing_plan["goal_id"],
+                        "user_id": run["user_id"],
+                    },
+                )
                 revision_number = int(
                     (
                         await connection.execute(
@@ -133,7 +150,7 @@ class PlanDraftService:
             tasks = self._scale_tasks(
                 draft_tasks_for_availability(start, availability), weekly_minutes
             )
-            summary = f"四周计划：{safe_summary(objective)}；{availability.summary}"
+            summary = f"备考计划：{safe_summary(objective)}；{availability.summary}"
             await connection.execute(
                 text(
                     "INSERT INTO plan_revisions(id,plan_id,user_id,agent_run_id,revision,status,objective_summary,"
@@ -156,6 +173,7 @@ class PlanDraftService:
                         {
                             "tasks": tasks,
                             "availability": availability.model_dump(mode="json"),
+                            "plan_scope": scope.model_dump(mode="json"),
                             "work_item_id": work_item_id,
                         }
                     ),
@@ -194,6 +212,8 @@ class PlanDraftService:
                     "title": safe_summary(objective)[:80],
                     "objective_summary": summary,
                     "weekly_minutes": weekly_minutes,
+                    "start_date": start.isoformat(),
+                    "end_date": end.isoformat(),
                 }
             )
         source_card = await self._persist_evidence(
@@ -214,7 +234,7 @@ class PlanDraftService:
             },
             "payload": {
                 "mode": mode,
-                "title": "公务员备考 · 四周计划草案",
+                "title": "公务员备考 · 计划草案",
                 "plans": plan_payloads,
                 "total_weekly_minutes": weekly_minutes * len(objectives),
                 "available_weekly_minutes": int(availability.weekly_minutes or 0),

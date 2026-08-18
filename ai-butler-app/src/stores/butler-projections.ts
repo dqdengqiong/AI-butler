@@ -8,6 +8,43 @@ import type {
   TaskViewModel,
 } from '@/types/view-models'
 
+/** 将服务端公开进度码映射为可展示文案，未知码由 Store 使用通用文案降级。 */
+export const progressLabels: Readonly<Record<string, string>> = {
+  UNDERSTANDING_INTENT: '正在理解你的意图',
+  RESEARCHING: '正在研究相关资料',
+  SEARCHING_WEB: '正在检索网络',
+  RETRIEVING_PRIVATE: '正在检索我的资料',
+  ORGANIZING_CITATIONS: '正在整理引用',
+  GENERATING_ANSWER: '正在生成回答',
+  BUILDING_PLAN: '正在制定计划',
+  REVIEWING_PLAN: '正在校验计划',
+  SCHEDULING_TASKS: '正在安排未来 7 天任务',
+  GENERATING_RESPONSE: '正在生成回复',
+}
+
+/** 将稳定错误码转换为明确失败语义，避免模型失败被误解为已创建计划。 */
+export function runErrorPresentation(
+  code: string,
+  retryable: boolean,
+): { title: string; description: string } {
+  if (code === 'PLANNER_MODEL_UNAVAILABLE') {
+    return {
+      title: '计划生成超时',
+      description: '计划生成超时，本次未创建计划，可以重试。',
+    }
+  }
+  if (code === 'PLANNER_MODEL_INVALID' || code.startsWith('PLAN_')) {
+    return {
+      title: '计划草稿校验失败',
+      description: '计划草稿未通过校验，本次未创建计划。',
+    }
+  }
+  return {
+    title: retryable ? '暂时无法生成回答' : '回答生成失败',
+    description: retryable ? '上次处理未完成，可以重新生成。' : '本次处理未完成。',
+  }
+}
+
 export function asObject(value: unknown): ApiObject | null {
   return typeof value === 'object' && value !== null ? (value as ApiObject) : null
 }
@@ -77,6 +114,8 @@ function mapCard(value: ApiObject): ChatItem | null {
             title: stringValue(plan, 'title', `计划 ${index + 1}`),
             description: stringValue(plan, 'objective_summary'),
             weeklyMinutes: numberValue(plan, 'weekly_minutes'),
+            startDate: stringValue(plan, 'start_date') || undefined,
+            endDate: stringValue(plan, 'end_date') || undefined,
           }))
         : [
             {
@@ -84,6 +123,8 @@ function mapCard(value: ApiObject): ChatItem | null {
               title: stringValue(payload, 'title', '公务员备考计划'),
               description: stringValue(payload, 'objective_summary'),
               weeklyMinutes: numberValue(payload, 'weekly_minutes'),
+              startDate: stringValue(payload, 'start_date') || undefined,
+              endDate: stringValue(payload, 'end_date') || undefined,
             },
           ]
     // 1.1 的 cardinality 是副作用审批契约的一部分；异常卡片必须只读降级。

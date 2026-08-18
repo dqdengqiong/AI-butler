@@ -36,6 +36,7 @@ async def test_complete_mock_login_plan_approval_task_file_and_governance_flow(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     settings = Settings(
+        model_routing_enabled=False,
         app_database_url="postgresql+psycopg://butler_test:butler_test@127.0.0.1:5432/butler_test",
         migration_database_url="postgresql+psycopg://butler_migrator:butler_migrator@127.0.0.1:5432/butler_test",
         object_storage_local_path=tmp_path,
@@ -300,6 +301,64 @@ async def test_complete_mock_login_plan_approval_task_file_and_governance_flow(
         )
         assert confirmed.status_code == 202, confirmed.text
         assert await app.state.butler.worker_poll_once(uuid4()) is True
+        period_messages = (
+            await client.get(
+                f"/v1/conversations/{conversation_id}/messages?limit=100", headers=headers
+            )
+        ).json()["items"]
+        period_card = next(
+            card
+            for message in reversed(period_messages)
+            for card in message.get("cards", {}).get("cards", [])
+            if card.get("payload", {}).get("phase") == "COLLECT_PLAN_PERIOD"
+            and not card["payload"].get("submitted")
+        )
+        selected_period = await client.post(
+            f"/v1/conversations/{conversation_id}/messages",
+            headers=headers,
+            json={
+                "schema_version": "1.0",
+                "client_message_id": f"select-period-{suffix}",
+                "content": "",
+                "attachments": [],
+                "selection": {
+                    "card_id": period_card["card_id"],
+                    "action_id": "submit-selection",
+                    "selected_option_ids": ["period-4-weeks"],
+                },
+            },
+        )
+        assert selected_period.status_code == 202, selected_period.text
+        assert await app.state.butler.worker_poll_once(uuid4()) is True
+        scope_messages = (
+            await client.get(
+                f"/v1/conversations/{conversation_id}/messages?limit=100", headers=headers
+            )
+        ).json()["items"]
+        scope_card = next(
+            card
+            for message in reversed(scope_messages)
+            for card in message.get("cards", {}).get("cards", [])
+            if card.get("payload", {}).get("phase") == "CONFIRM_PLAN_SCOPE"
+            and not card["payload"].get("submitted")
+        )
+        confirmed_scope = await client.post(
+            f"/v1/conversations/{conversation_id}/messages",
+            headers=headers,
+            json={
+                "schema_version": "1.0",
+                "client_message_id": f"confirm-scope-{suffix}",
+                "content": "",
+                "attachments": [],
+                "selection": {
+                    "card_id": scope_card["card_id"],
+                    "action_id": "submit-selection",
+                    "selected_option_ids": ["confirm-plan-scope"],
+                },
+            },
+        )
+        assert confirmed_scope.status_code == 202, confirmed_scope.text
+        assert await app.state.butler.worker_poll_once(uuid4()) is True
         draft_run = (await client.get(f"/v1/agent-runs/{run_id}", headers=headers)).json()
         assert draft_run["status"] == "AWAITING_APPROVAL"
         approval_id = draft_run["next_action"]["approval_id"]
@@ -318,6 +377,8 @@ async def test_complete_mock_login_plan_approval_task_file_and_governance_flow(
         assert plan_card["payload"]["mode"] == "SINGLE_PLAN_CREATE"
         assert plan_card["payload"]["total_weekly_minutes"] == 255
         assert plan_card["payload"]["plans"][0]["weekly_minutes"] == 255
+        assert plan_card["payload"]["plans"][0]["start_date"]
+        assert plan_card["payload"]["plans"][0]["end_date"]
         assert "claim_ids" not in plan_card["payload"]
         source_card = next(
             card
@@ -480,6 +541,64 @@ async def test_complete_mock_login_plan_approval_task_file_and_governance_flow(
             },
         )
         assert confirmed_adjustment.status_code == 202
+        assert await app.state.butler.worker_poll_once(uuid4()) is True
+        adjustment_period_messages = (
+            await client.get(
+                f"/v1/conversations/{conversation_id}/messages?limit=100", headers=headers
+            )
+        ).json()["items"]
+        adjustment_period = next(
+            card
+            for message in reversed(adjustment_period_messages)
+            if message.get("agent_run_id") == adjustment_run
+            for card in message.get("cards", {}).get("cards", [])
+            if card.get("payload", {}).get("phase") == "COLLECT_PLAN_PERIOD"
+        )
+        selected_adjustment_period = await client.post(
+            f"/v1/conversations/{conversation_id}/messages",
+            headers=headers,
+            json={
+                "schema_version": "1.0",
+                "client_message_id": f"select-adjustment-period-{suffix}",
+                "content": "",
+                "attachments": [],
+                "selection": {
+                    "card_id": adjustment_period["card_id"],
+                    "action_id": "submit-selection",
+                    "selected_option_ids": ["period-4-weeks"],
+                },
+            },
+        )
+        assert selected_adjustment_period.status_code == 202
+        assert await app.state.butler.worker_poll_once(uuid4()) is True
+        adjustment_scope_messages = (
+            await client.get(
+                f"/v1/conversations/{conversation_id}/messages?limit=100", headers=headers
+            )
+        ).json()["items"]
+        adjustment_scope = next(
+            card
+            for message in reversed(adjustment_scope_messages)
+            if message.get("agent_run_id") == adjustment_run
+            for card in message.get("cards", {}).get("cards", [])
+            if card.get("payload", {}).get("phase") == "CONFIRM_PLAN_SCOPE"
+        )
+        confirmed_adjustment_scope = await client.post(
+            f"/v1/conversations/{conversation_id}/messages",
+            headers=headers,
+            json={
+                "schema_version": "1.0",
+                "client_message_id": f"confirm-adjustment-scope-{suffix}",
+                "content": "",
+                "attachments": [],
+                "selection": {
+                    "card_id": adjustment_scope["card_id"],
+                    "action_id": "submit-selection",
+                    "selected_option_ids": ["confirm-plan-scope"],
+                },
+            },
+        )
+        assert confirmed_adjustment_scope.status_code == 202
         assert await app.state.butler.worker_poll_once(uuid4()) is True
         adjustment_state = (
             await client.get(f"/v1/agent-runs/{adjustment_run}", headers=headers)

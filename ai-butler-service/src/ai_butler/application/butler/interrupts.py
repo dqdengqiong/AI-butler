@@ -10,6 +10,8 @@ from ai_butler.agent.availability import (
     AvailabilityInterpretationV1,
     quick_availability_options,
 )
+from ai_butler.agent.contracts import PlanScopeDraftV1, PlanScopeV1
+from ai_butler.agent.plan_scope import quick_plan_period_options
 
 from .context import ButlerContext
 from .events import EventService
@@ -92,6 +94,38 @@ class InterruptionService:
             run["attempt"],
         )
 
+    async def _interrupt_for_clarification(
+        self,
+        connection: AsyncConnection,
+        run: dict[str, Any],
+        question: str,
+        *,
+        phase: str = "CLARIFY_INTENT",
+    ) -> None:
+        """以自然语言输入卡中断含糊流程，不向客户端暴露模型置信度。"""
+
+        card: dict[str, object] = {
+            "schema_version": "1.0",
+            "cards": [
+                {
+                    "schema_version": "1.0",
+                    "card_id": str(uuid4()),
+                    "card_type": "SelectionCard",
+                    "entity_refs": {},
+                    "payload": {
+                        "question": question,
+                        "description": "请直接输入补充信息。",
+                        "input_mode": "NATURAL_LANGUAGE",
+                        "phase": phase,
+                        "input_placeholder": "请输入更具体的目标或问题",
+                        "options": [],
+                    },
+                    "actions": [],
+                }
+            ],
+        }
+        await self._write_input_interrupt(connection, run, question, card)
+
     async def _interrupt_for_availability_confirmation(
         self,
         connection: AsyncConnection,
@@ -124,7 +158,7 @@ class InterruptionService:
                         "input_placeholder": "如需修改，也可以直接输入新的时间安排",
                         "interpretation": interpretation.model_dump(mode="json"),
                         "options": [
-                            {"id": "confirm-availability", "label": "确认并生成计划"},
+                            {"id": "confirm-availability", "label": "确认学习时间"},
                             {"id": "revise-availability", "label": "重新描述"},
                         ],
                     },
@@ -139,6 +173,93 @@ class InterruptionService:
             ],
         }
         await self._write_input_interrupt(connection, run, content, card)
+
+    async def _interrupt_for_plan_period(
+        self,
+        connection: AsyncConnection,
+        run: dict[str, Any],
+        draft: PlanScopeDraftV1,
+        *,
+        question: str = "选择计划周期",
+    ) -> None:
+        """在时间确认后收集明确周期；自定义输入必须包含四位年份。"""
+
+        content = "请选择 4、8 或 12 周，也可以输入带年份的未来目标日期。"
+        card: dict[str, object] = {
+            "schema_version": "1.0",
+            "cards": [
+                {
+                    "schema_version": "1.0",
+                    "card_id": str(uuid4()),
+                    "card_type": "SelectionCard",
+                    "entity_refs": {},
+                    "payload": {
+                        "question": question,
+                        "description": (
+                            f"计划从 {draft.start_date.isoformat()} 开始。"
+                            "自定义日期示例：2026-10-31。"
+                        ),
+                        "input_mode": "NATURAL_LANGUAGE",
+                        "phase": "COLLECT_PLAN_PERIOD",
+                        "input_placeholder": "请输入带年份的未来日期，例如：2026-10-31",
+                        "options": list(quick_plan_period_options(draft.start_date)),
+                    },
+                    "actions": [
+                        {
+                            "action_id": "submit-selection",
+                            "action_type": "SUBMIT_SELECTION",
+                            "label": "确认周期",
+                        }
+                    ],
+                }
+            ],
+        }
+        await self._write_input_interrupt(connection, run, content, card)
+
+    async def _interrupt_for_plan_scope_confirmation(
+        self,
+        connection: AsyncConnection,
+        run: dict[str, Any],
+        scope: PlanScopeV1,
+    ) -> None:
+        """展示服务端可信范围快照，最终确认后才允许进入 Planner。"""
+
+        description = (
+            f"目标：{scope.objective_summary}\n"
+            f"每周时间：{scope.availability.summary}\n"
+            f"计划周期：{scope.start_date.isoformat()} 至 {scope.target_date.isoformat()}"
+        )
+        card: dict[str, object] = {
+            "schema_version": "1.0",
+            "cards": [
+                {
+                    "schema_version": "1.0",
+                    "card_id": str(uuid4()),
+                    "card_type": "SelectionCard",
+                    "entity_refs": {},
+                    "payload": {
+                        "question": "确认计划范围",
+                        "description": description,
+                        "input_mode": "SINGLE_SELECT",
+                        "phase": "CONFIRM_PLAN_SCOPE",
+                        "plan_scope": scope.model_dump(mode="json"),
+                        "options": [
+                            {"id": "confirm-plan-scope", "label": "确认并生成计划"},
+                            {"id": "revise-plan-period", "label": "修改计划周期"},
+                            {"id": "revise-availability", "label": "修改学习时间"},
+                        ],
+                    },
+                    "actions": [
+                        {
+                            "action_id": "submit-selection",
+                            "action_type": "SUBMIT_SELECTION",
+                            "label": "提交",
+                        }
+                    ],
+                }
+            ],
+        }
+        await self._write_input_interrupt(connection, run, description, card)
 
     async def _interrupt_for_availability_clarification(
         self, connection: AsyncConnection, run: dict[str, Any], question: str

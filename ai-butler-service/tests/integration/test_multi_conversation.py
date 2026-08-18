@@ -44,6 +44,7 @@ async def _login(client: httpx.AsyncClient, code: str) -> tuple[dict[str, str], 
 
 def _settings(tmp_path: Path) -> Settings:
     return Settings(
+        model_routing_enabled=False,
         app_database_url=(
             "postgresql+psycopg://butler_test:butler_test@127.0.0.1:5432/butler_test"
         ),

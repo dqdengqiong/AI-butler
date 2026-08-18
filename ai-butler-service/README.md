@@ -119,17 +119,17 @@ pnpm dev:h5
 
 ## 模型路由配置
 
-本地开发和普通测试默认 `MODEL_ROUTING_ENABLED=false`，只使用确定性 Fake。真实调用由 `model-routing.toml` 固定路由：纯文本节点使用千问主、豆包备，多模态节点使用豆包主、千问备；只在超时、连接失败、429 或 5xx 时切换。运行时不按价格、延迟或模型自评选模。
+本地开发和普通测试默认 `MODEL_ROUTING_ENABLED=false`，只使用确定性 Fake。真实调用由 `model-routing.toml` 固定路由；当前配置全部使用千问，且不设置备用模型。需要多模型容灾时，可为具体路由显式增加跨供应商 fallback；只在超时、连接失败、429 或 5xx 时切换。网关只初始化路由实际引用的模型，未引用的 provider 或模型不要求配置密钥。运行时不按价格、延迟或模型自评选模。新 run 固定为 `butler-graph-v3`/`butler-prompts-v3`，旧 v2 run 仍按创建时版本恢复。
 
 启用真实模型时，在未提交到版本库的 `.env.local` 中设置：
 
 ```dotenv
 MODEL_ROUTING_ENABLED=true
 MODEL_ROUTING_FILE=./model-routing.toml
-MODEL_API_KEYS={"qwen":"replace-me","doubao":"replace-me"}
+MODEL_API_KEYS={"qwen":"replace-me"}
 ```
 
-`MODEL_SHADOW_MODE=true` 仅用于显式评测：主模型成功后还会调用备用模型并只记录调用元数据，不影响正式输出。生产与 staging 启动时，每条路由必须恰好有一个跨供应商备用；非生产配置可以使用 `fallbacks=[]`。配置不接受价格、`price_as_of` 或其他未定义字段。调用审计不保存 Prompt、用户原文、文件正文、工具原始输出、思维链或密钥。
+`MODEL_SHADOW_MODE=true` 仅用于显式评测：存在备用模型时，主模型成功后还会调用备用模型并只记录调用元数据，不影响正式输出；真实会话应保持关闭。单供应商配置允许所有环境使用 `fallbacks=[]`；配置了多个启用的模型供应商时，生产与 staging 的每条路由必须恰好有一个跨供应商备用。配置不接受价格、`price_as_of` 或其他未定义字段。工作流调用用 `run_id` 关联审计并汇总实际模型和 Token；审计不保存 Prompt、用户原文、文件正文、工具原始输出、思维链或密钥。
 
 ## 常用命令
 
@@ -154,3 +154,5 @@ MODEL_API_KEYS={"qwen":"replace-me","doubao":"replace-me"}
 Agent 评测只使用本地合成数据。DeepEval 的 dotenv 自动加载、遥测和云端报告在命令中均被禁用；`make eval-live` 还要求通过 `EVAL_RUNNER_FACTORIES={"qwen_balanced":"module.path:qwen_factory","doubao_turbo":"module.path:doubao_factory"}` 显式提供两个真实 Agent Runner。命令会输出独立报告，避免把合约自测误报为模型质量基线。
 
 规范与架构入口见 [docs/README.md](docs/README.md)。
+
+模型："doubao_turbo"，"qwen""

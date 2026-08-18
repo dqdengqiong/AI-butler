@@ -19,6 +19,7 @@ stack-up:
 	$(COMPOSE) up -d --build
 	$(COMPOSE) exec -T api alembic upgrade head
 	$(COMPOSE) exec -T api python -m ai_butler.scripts.setup_langgraph
+	$(COMPOSE) exec -T api python -m ai_butler.scripts.setup_knowledge
 	$(COMPOSE) exec -T api butler-seed
 
 stack-down:

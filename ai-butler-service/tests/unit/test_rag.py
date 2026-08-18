@@ -17,7 +17,12 @@ from ai_butler.adapters.search import (
     minimize_public_query,
     normalize_private_query,
 )
-from ai_butler.adapters.vector import QdrantVectorStore, VectorPoint, VectorSearchHit
+from ai_butler.adapters.vector import (
+    QdrantVectorStore,
+    VectorPoint,
+    VectorSearchHit,
+    VectorStoreError,
+)
 from ai_butler.agent.evidence import (
     AnswerSegmentV1,
     EvidenceGate,
@@ -233,6 +238,16 @@ async def test_qdrant_adapter_filters_tenant_and_maps_chunk_ids() -> None:
     async def handler(request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content) if request.content else {}
         requests.append(body)
+        if request.method == "GET":
+            return httpx.Response(
+                200,
+                json={
+                    "result": {
+                        "points_count": 1,
+                        "config": {"params": {"vectors": {"size": 2}}},
+                    }
+                },
+            )
         if request.url.path.endswith("/points/query"):
             assert body["filter"] == {
                 "must": [
@@ -278,3 +293,53 @@ async def test_qdrant_adapter_filters_tenant_and_maps_chunk_ids() -> None:
     )
     await store.delete_document(USER_ID, DOCUMENT_ID)
     assert len(requests) == 6
+
+
+@pytest.mark.asyncio
+async def test_qdrant_setup_repairs_only_empty_dimension_mismatch() -> None:
+    requests: list[tuple[str, str]] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append((request.method, request.url.path))
+        if request.method == "GET":
+            return httpx.Response(
+                200,
+                json={
+                    "result": {
+                        "points_count": 0,
+                        "config": {"params": {"vectors": {"size": 8}}},
+                    }
+                },
+            )
+        return httpx.Response(200, json={"result": True})
+
+    store = QdrantVectorStore("http://qdrant", "test", 1024, httpx.MockTransport(handler))
+    await store.setup()
+
+    assert requests == [
+        ("GET", "/collections/test"),
+        ("DELETE", "/collections/test"),
+        ("PUT", "/collections/test"),
+        ("PUT", "/collections/test/index"),
+        ("PUT", "/collections/test/index"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_qdrant_setup_rejects_nonempty_dimension_mismatch() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "GET"
+        return httpx.Response(
+            200,
+            json={
+                "result": {
+                    "points_count": 1,
+                    "config": {"params": {"vectors": {"size": 8}}},
+                }
+            },
+        )
+
+    store = QdrantVectorStore("http://qdrant", "test", 1024, httpx.MockTransport(handler))
+
+    with pytest.raises(VectorStoreError, match="dimension mismatch"):
+        await store.setup()

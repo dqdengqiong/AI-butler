@@ -118,6 +118,8 @@ export type ChatItem =
         title: string
         description: string
         weeklyMinutes: number
+        startDate?: string
+        endDate?: string
       }[]
       warnings: string[]
       status: 'pending' | 'approved' | 'editing' | 'rejected'
@@ -136,6 +138,10 @@ export type ChatItem =
       kind: 'status'
       title: string
       description: string
+      state?: 'loading' | 'error'
       runId?: string
+      attempt?: number
+      retryable?: boolean
+      retrying?: boolean
       progressCode?: string
     }

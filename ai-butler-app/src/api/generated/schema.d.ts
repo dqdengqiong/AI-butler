@@ -1127,6 +1127,8 @@ export interface components {
         };
         /** PlanCardPlanV11 */
         PlanCardPlanV11: {
+            /** End Date */
+            end_date?: string | null;
             /** Objective Summary */
             objective_summary: string;
             /**
@@ -1139,6 +1141,8 @@ export interface components {
              * Format: uuid
              */
             plan_revision_id: string;
+            /** Start Date */
+            start_date?: string | null;
             /** Title */
             title: string;
             /** Weekly Minutes */

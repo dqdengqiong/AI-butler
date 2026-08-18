@@ -7,6 +7,7 @@ import ChatStatusCard from '@/components/chat/ChatStatusCard.vue'
 import type { ChatItem } from '@/types/view-models'
 
 type PlanItem = Extract<ChatItem, { kind: 'plan' }>
+type StatusItem = Extract<ChatItem, { kind: 'status' }>
 defineProps<{ items: ChatItem[]; fresh: boolean }>()
 defineEmits<{
   selectOption: [itemKey: string, optionIndex: number]
@@ -15,6 +16,7 @@ defineEmits<{
   editPlan: [item: PlanItem]
   rejectPlan: [item: PlanItem]
   openSource: [citationId: string]
+  retryRun: [item: StatusItem]
 }>()
 </script>
 
@@ -43,7 +45,11 @@ defineEmits<{
         :item="item"
         @open="(citationId) => $emit('openSource', citationId)"
       />
-      <ChatStatusCard v-else-if="item.kind === 'status'" :item="item" />
+      <ChatStatusCard
+        v-else-if="item.kind === 'status'"
+        :item="item"
+        @retry="(status) => $emit('retryRun', status)"
+      />
     </template>
   </view>
 </template>

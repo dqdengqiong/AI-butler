@@ -1,4 +1,4 @@
-"""静态双模型目录、能力约束与启动期校验。"""
+"""静态模型目录、能力约束与启动期校验。"""
 
 from __future__ import annotations
 
@@ -84,13 +84,10 @@ class ModelRoutingConfig(BaseModel):
 
     @model_validator(mode="after")
     def validate_references_and_capabilities(self) -> ModelRoutingConfig:
-        if set(self.providers) != {"qwen", "doubao"}:
-            raise ValueError("routing must declare exactly qwen and doubao providers")
-        if len(self.models) != 2 or {profile.provider for profile in self.models.values()} != {
-            "qwen",
-            "doubao",
-        }:
-            raise ValueError("routing must declare exactly one qwen and one doubao chat model")
+        if not self.providers:
+            raise ValueError("routing must declare at least one provider")
+        if not self.models:
+            raise ValueError("routing must declare at least one chat model")
         for alias, profile in self.models.items():
             if profile.provider not in self.providers:
                 raise ValueError(f"model {alias} references unknown provider")
@@ -133,6 +130,11 @@ class ModelRoutingConfig(BaseModel):
         ):
             raise ValueError("latest model aliases are only allowed in evaluation environments")
         if environment not in {"production", "staging"}:
+            return
+        enabled_providers = {
+            profile.provider for profile in self.models.values() if profile.enabled
+        }
+        if len(enabled_providers) < 2:
             return
         missing = sorted(task for task, route in self.routes.items() if len(route.fallbacks) != 1)
         if missing:

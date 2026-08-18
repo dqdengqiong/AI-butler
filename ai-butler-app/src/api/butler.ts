@@ -7,6 +7,7 @@ type PhoneVerificationCodeRequest = components['schemas']['PhoneVerificationCode
 type RefreshRequest = components['schemas']['RefreshRequest']
 type LogoutRequest = components['schemas']['LogoutRequest']
 type SendMessageRequest = components['schemas']['SendMessageRequest']
+type RetryRunRequest = components['schemas']['RetryRunRequest']
 type ApprovalRequest = components['schemas']['ApprovalDecisionRequest']
 type TaskExecutionRequest = components['schemas']['TaskExecutionRequest']
 type PreferencesRequest = components['schemas']['PreferencesRequest']
@@ -141,6 +142,14 @@ export const butlerApi = {
       method: 'POST',
       accessToken,
       headers: { 'Idempotency-Key': idempotencyKey('cancel-run') },
+    })
+  },
+  retryRun(runId: string, payload: RetryRunRequest, accessToken: string): Promise<ApiObject> {
+    return request({
+      path: `/v1/agent-runs/${encodeURIComponent(runId)}/retry`,
+      method: 'POST',
+      data: payload,
+      accessToken,
     })
   },
   streamTicket(runId: string, accessToken: string): Promise<ApiObject> {
