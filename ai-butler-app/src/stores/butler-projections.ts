@@ -3,6 +3,7 @@ import type {
   AgentShortcutViewModel,
   ChatItem,
   ConversationViewModel,
+  DailyAvailabilityViewModel,
   PlanViewModel,
   SourceSummaryViewModel,
   TaskViewModel,
@@ -59,6 +60,32 @@ export function stringValue(object: ApiObject, key: string, fallback = ''): stri
 
 export function numberValue(object: ApiObject, key: string, fallback = 0): number {
   return typeof object[key] === 'number' ? object[key] : fallback
+}
+
+function mapDailyAvailability(value: unknown): DailyAvailabilityViewModel[] {
+  const supportedSources: DailyAvailabilityViewModel['source'][] = [
+    'EXPLICIT_RULE',
+    'WEEKLY_EVEN_SPLIT',
+    'EXCLUDED_WEEKDAY',
+    'EXCLUDED_DATE',
+    'NO_RULE',
+  ]
+  return asArray(value).flatMap((item) => {
+    const date = stringValue(item, 'date')
+    const dayOfWeek = numberValue(item, 'day_of_week')
+    const availableMinutes = numberValue(item, 'available_minutes', -1)
+    const source = stringValue(item, 'source') as DailyAvailabilityViewModel['source']
+    if (
+      !date ||
+      dayOfWeek < 1 ||
+      dayOfWeek > 7 ||
+      availableMinutes < 0 ||
+      !supportedSources.includes(source)
+    ) {
+      return []
+    }
+    return [{ date, dayOfWeek, availableMinutes, source }]
+  })
 }
 
 export function mapPlan(value: ApiObject): PlanViewModel {
@@ -122,6 +149,7 @@ function mapCard(value: ApiObject): ChatItem | null {
       warnings: Array.isArray(payload.warnings)
         ? payload.warnings.filter((item): item is string => typeof item === 'string')
         : [],
+      dailyAvailability: mapDailyAvailability(payload.daily_availability),
       status: (stringValue(payload, 'status', 'EXPIRED') === 'READY' &&
       new Date(expiresAt).getTime() <= Date.now()
         ? 'EXPIRED'

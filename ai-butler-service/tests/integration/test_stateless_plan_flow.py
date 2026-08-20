@@ -181,6 +181,10 @@ async def test_natural_language_clarification_preview_and_confirmation(tmp_path:
             str(first["conversation_id"]),
         )
         preview_message, preview_card = _preview(messages)
+        daily_availability = preview_card["payload"]["daily_availability"]
+        assert len(daily_availability) == 7
+        assert sum(item["available_minutes"] for item in daily_availability) == 540
+        assert all(item["source"] == "EXPLICIT_RULE" for item in daily_availability)
         async with app.state.butler.database.connect() as connection:  # type: ignore[attr-defined]
             for table in ("goals", "plans", "plan_revisions", "tasks", "notification_jobs"):
                 result = await connection.execute(

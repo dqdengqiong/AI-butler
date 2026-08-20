@@ -95,12 +95,26 @@ class ConversationRepository:
         if not has_user_message:
             await connection.execute(
                 text(
+                    "UPDATE workflow_sessions SET status='CANCELLED',completed_at=:now,updated_at=:now "
+                    "WHERE conversation_id=:id AND status IN ('ACTIVE','WAITING_INPUT')"
+                ),
+                {"id": current["id"], "now": now},
+            )
+            await connection.execute(
+                text(
                     "UPDATE conversations SET deleted_at=:now,updated_at=:now "
                     "WHERE id=:id AND status='CURRENT'"
                 ),
                 {"id": current["id"], "now": now},
             )
             return None
+        await connection.execute(
+            text(
+                "UPDATE workflow_sessions SET status='CANCELLED',completed_at=:now,updated_at=:now "
+                "WHERE conversation_id=:id AND status IN ('ACTIVE','WAITING_INPUT')"
+            ),
+            {"id": current["id"], "now": now},
+        )
         await connection.execute(
             text(
                 "UPDATE conversations SET status='ARCHIVED',archived_at=:now,archive_reason=:reason,"

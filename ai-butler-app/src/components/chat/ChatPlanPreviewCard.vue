@@ -7,6 +7,20 @@ defineEmits<{
   confirm: [item: PlanItem]
   edit: [item: PlanItem]
 }>()
+
+const weekdayLabels = ['周一', '周二', '周三', '周四', '周五', '周六', '周日']
+
+function dateLabel(value: string): string {
+  const [, month = '', day = ''] = value.split('-')
+  return `${Number(month)}月${Number(day)}日`
+}
+
+function durationLabel(minutes: number): string {
+  if (minutes <= 0) return '休息'
+  if (minutes % 60 === 0) return `${minutes / 60} 小时`
+  if (minutes > 60) return `${Math.floor(minutes / 60)} 小时 ${minutes % 60} 分钟`
+  return `${minutes} 分钟`
+}
 </script>
 
 <template>
@@ -27,6 +41,17 @@ defineEmits<{
       >
       <text class="plan-period"> {{ item.startDate }} 至 {{ item.endDate }} </text>
       <text class="plan-note">{{ item.description }}</text>
+    </view>
+    <view v-if="item.dailyAvailability.length" class="daily-availability">
+      <text class="daily-title">未来 7 天可投入时间</text>
+      <view v-for="day in item.dailyAvailability" :key="day.date" class="daily-row">
+        <text class="daily-date">
+          {{ dateLabel(day.date) }} {{ weekdayLabels[day.dayOfWeek - 1] }}
+        </text>
+        <text class="daily-duration" :class="{ rest: day.availableMinutes === 0 }">
+          {{ durationLabel(day.availableMinutes) }}
+        </text>
+      </view>
     </view>
     <text v-for="warning in item.warnings" :key="warning" class="plan-warning">{{ warning }}</text>
     <view v-if="item.status === 'READY'" class="card-actions">
@@ -119,6 +144,36 @@ defineEmits<{
   color: #6556e8;
   font-size: 19rpx;
   font-weight: 650;
+}
+.daily-availability {
+  margin-top: 18rpx;
+  padding: 20rpx;
+  background: #faf9fd;
+  border: 1px solid #ece9f4;
+  border-radius: 22rpx;
+}
+.daily-title {
+  display: block;
+  margin-bottom: 10rpx;
+  color: #4a4558;
+  font-size: 20rpx;
+  font-weight: 700;
+}
+.daily-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 52rpx;
+  color: #625e70;
+  font-size: 19rpx;
+}
+.daily-duration {
+  color: #6556e8;
+  font-weight: 700;
+}
+.daily-duration.rest {
+  color: #9994a5;
+  font-weight: 600;
 }
 .card-actions {
   display: flex;

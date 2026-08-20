@@ -1,8 +1,10 @@
+"""Agent Run 的完成、失败与 Segment 归档处理。"""
+
 from __future__ import annotations
 
 import hashlib
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -13,9 +15,9 @@ from ai_butler.adapters.llm import ModelStreamEvent
 from ai_butler.agent.evidence import estimate_tokens
 from ai_butler.domain.errors import ButlerError
 
-from .context import ButlerContext
-from .events import EventService
-from .shared import (
+from ..context import ButlerContext
+from ..events import EventService
+from ..shared import (
     _json,
     _row,
 )
@@ -234,47 +236,72 @@ class CompletionService:
     async def _maybe_archive_segment(
         self, connection: AsyncConnection, run: dict[str, Any]
     ) -> None:
-        contents = (
+        message_rows = (
             (
                 await connection.execute(
                     text(
-                        "SELECT content FROM messages WHERE segment_id=:segment ORDER BY created_at,id"
+                        "SELECT id,role,content FROM messages WHERE segment_id=:segment "
+                        "AND status='COMPLETED' ORDER BY created_at,id"
                     ),
                     {"segment": run["segment_id"]},
                 )
             )
-            .scalars()
+            .mappings()
             .all()
         )
-        estimated = sum(estimate_tokens(str(content)) for content in contents)
+        estimated = sum(estimate_tokens(str(row["content"])) for row in message_rows)
         estimated += 256  # system facts, card metadata and model output reserve
+        summary_version = int(
+            (
+                await connection.execute(
+                    text("SELECT sequence FROM conversation_segments WHERE id=:id"),
+                    {"id": run["segment_id"]},
+                )
+            ).scalar_one()
+        )
         await connection.execute(
             text("UPDATE conversation_segments SET estimated_context_tokens=:tokens WHERE id=:id"),
             {"tokens": estimated, "id": run["segment_id"]},
         )
-        hard = int(self.settings.context_window_tokens * self.settings.context_hard_limit_ratio)
-        soft = int(self.settings.context_window_tokens * self.settings.context_soft_limit_ratio)
+        hard = getattr(
+            self.settings,
+            "segment_rotation_tokens",
+            int(self.settings.context_window_tokens * self.settings.context_hard_limit_ratio),
+        )
+        soft = getattr(
+            self.settings,
+            "segment_summary_trigger_tokens",
+            int(self.settings.context_window_tokens * self.settings.context_soft_limit_ratio),
+        )
+        summary_data = _structured_segment_summary(message_rows, run["segment_id"])
+        source_from = message_rows[0]["id"] if message_rows else None
+        source_through = message_rows[-1]["id"] if message_rows else None
         if estimated >= soft:
             await connection.execute(
                 text(
                     "INSERT INTO conversation_summaries(id,conversation_id,segment_id,summary_type,version,"
-                    "summary_data,source_hash,prompt_version,token_count) VALUES(:id,:conversation,:segment,"
-                    "'INCREMENTAL',1,CAST(:content AS jsonb),:source_hash,'summary-v1',:tokens) "
+                    "summary_data,source_from_message_id,source_through_message_id,source_hash,"
+                    "prompt_version,token_count) VALUES(:id,:conversation,:segment,'INCREMENTAL',"
+                    ":version,CAST(:content AS jsonb),:source_from,:source_through,:source_hash,"
+                    "'summary-v2',:tokens) "
                     "ON CONFLICT(conversation_id,summary_type,version) DO UPDATE SET "
                     "summary_data=EXCLUDED.summary_data,source_hash=EXCLUDED.source_hash,"
+                    "source_from_message_id=EXCLUDED.source_from_message_id,"
+                    "source_through_message_id=EXCLUDED.source_through_message_id,"
                     "token_count=EXCLUDED.token_count"
                 ),
                 {
                     "id": uuid4(),
                     "conversation": run["conversation_id"],
                     "segment": run["segment_id"],
-                    "content": _json(
-                        {"summary": "验证版确定性摘要", "source_segment_id": str(run["segment_id"])}
-                    ),
+                    "version": summary_version,
+                    "content": _json(summary_data),
+                    "source_from": source_from,
+                    "source_through": source_through,
                     "source_hash": hashlib.sha256(
                         f"{run['segment_id']}:{estimated}".encode()
                     ).hexdigest(),
-                    "tokens": min(1500, estimated // 10),
+                    "tokens": estimate_tokens(_json(summary_data)),
                 },
             )
         if estimated < hard:
@@ -293,8 +320,9 @@ class CompletionService:
         await connection.execute(
             text(
                 "INSERT INTO conversation_summaries(id,conversation_id,segment_id,summary_type,version,"
-                "summary_data,source_hash,prompt_version,token_count) VALUES(:id,:conversation,:segment,"
-                "'SEGMENT_FINAL',:version,CAST(:content AS jsonb),:source_hash,'summary-v1',:tokens) "
+                "summary_data,source_from_message_id,source_through_message_id,source_hash,prompt_version,"
+                "token_count) VALUES(:id,:conversation,:segment,'SEGMENT_FINAL',:version,"
+                "CAST(:content AS jsonb),:source_from,:source_through,:source_hash,'summary-v2',:tokens) "
                 "ON CONFLICT(conversation_id,summary_type,version) DO NOTHING"
             ),
             {
@@ -302,15 +330,11 @@ class CompletionService:
                 "conversation": run["conversation_id"],
                 "segment": run["segment_id"],
                 "version": final_version,
-                "content": _json(
-                    {
-                        "summary": "验证版终态交接摘要",
-                        "memory_refs": [],
-                        "source_segment_id": str(run["segment_id"]),
-                    }
-                ),
+                "content": _json(summary_data),
+                "source_from": source_from,
+                "source_through": source_through,
                 "source_hash": final_hash,
-                "tokens": min(1500, max(1, estimated // 10)),
+                "tokens": estimate_tokens(_json(summary_data)),
             },
         )
         final_summary_id = UUID(
@@ -331,26 +355,34 @@ class CompletionService:
         handoff_hash = hashlib.sha256(
             f"handoff:{run['conversation_id']}:{handoff_version}:{final_summary_id}".encode()
         ).hexdigest()
+        previous_summary: dict[str, object] = {}
+        if conversation["latest_handoff_summary_id"] is not None:
+            previous_value = (
+                await connection.execute(
+                    text("SELECT summary_data FROM conversation_summaries WHERE id=:id"),
+                    {"id": conversation["latest_handoff_summary_id"]},
+                )
+            ).scalar_one_or_none()
+            if isinstance(previous_value, dict):
+                previous_summary = previous_value
+        handoff_data = _merge_handoff_summary(previous_summary, summary_data, final_summary_id)
         await connection.execute(
             text(
                 "INSERT INTO conversation_summaries(id,conversation_id,segment_id,summary_type,version,"
-                "summary_data,source_hash,prompt_version,token_count) VALUES(:id,:conversation,:segment,"
-                "'CUMULATIVE_HANDOFF',:version,CAST(:content AS jsonb),:source_hash,'summary-v1',:tokens)"
+                "summary_data,source_from_message_id,source_through_message_id,source_hash,prompt_version,"
+                "token_count) VALUES(:id,:conversation,:segment,'CUMULATIVE_HANDOFF',:version,"
+                "CAST(:content AS jsonb),:source_from,:source_through,:source_hash,'summary-v2',:tokens)"
             ),
             {
                 "id": handoff_id,
                 "conversation": run["conversation_id"],
                 "segment": run["segment_id"],
                 "version": handoff_version,
-                "content": _json(
-                    {
-                        "summary": "累计交接摘要",
-                        "memory_refs": [],
-                        "final_summary_id": str(final_summary_id),
-                    }
-                ),
+                "content": _json(handoff_data),
+                "source_from": source_from,
+                "source_through": source_through,
                 "source_hash": handoff_hash,
-                "tokens": min(1800, max(1, estimated // 8)),
+                "tokens": estimate_tokens(_json(handoff_data)),
             },
         )
         new_segment = uuid4()
@@ -397,3 +429,55 @@ class CompletionService:
             ),
             {"id": run["segment_id"]},
         )
+
+
+def _structured_segment_summary(rows: Sequence[Any], segment_id: object) -> dict[str, object]:
+    """生成可验证、可预算的结构化摘要，不写固定占位文本。"""
+
+    recent = [
+        f"{row['role']}: {str(row['content']).strip()[:300]}"
+        for row in rows[-6:]
+        if str(row["content"]).strip()
+    ]
+    user_messages = [
+        str(row["content"]).strip() for row in rows if row["role"] == "USER" and row["content"]
+    ]
+    assistant_questions = [
+        str(row["content"]).strip()[:200]
+        for row in rows
+        if row["role"] == "ASSISTANT" and str(row["content"]).strip().endswith(("?", "？"))
+    ]
+    return {
+        "schema_version": "2.0",
+        "source_segment_id": str(segment_id),
+        "current_goal": user_messages[-1][:500] if user_messages else "",
+        "confirmed_constraints": [],
+        "decisions": [],
+        "open_questions": assistant_questions[-3:],
+        "recent_context": recent,
+        "memory_refs": [],
+    }
+
+
+def _merge_handoff_summary(
+    previous: dict[str, object], current: dict[str, object], final_summary_id: UUID
+) -> dict[str, object]:
+    previous_context = previous.get("recent_context")
+    current_context = current.get("recent_context")
+    combined = [
+        str(value)
+        for value in (
+            (previous_context if isinstance(previous_context, list) else [])
+            + (current_context if isinstance(current_context, list) else [])
+        )[-8:]
+    ]
+    return {
+        "schema_version": "2.0",
+        "current_goal": current.get("current_goal") or previous.get("current_goal") or "",
+        "confirmed_constraints": current.get("confirmed_constraints") or [],
+        "decisions": current.get("decisions") or [],
+        "open_questions": current.get("open_questions") or [],
+        "recent_context": combined,
+        "memory_refs": [],
+        "final_summary_id": str(final_summary_id),
+    }

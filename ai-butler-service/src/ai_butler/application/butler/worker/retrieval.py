@@ -1,4 +1,4 @@
-"""私有知识召回与 PostgreSQL 所有权复核。"""
+"""Worker 的用户私有知识检索。"""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from sqlalchemy import text
 
 from ai_butler.adapters.search import SearchResult
 
-from .context import ButlerContext
+from ..context import ButlerContext
 
 
 class PrivateEvidenceRetriever:

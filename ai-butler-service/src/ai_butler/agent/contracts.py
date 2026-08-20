@@ -14,7 +14,7 @@ from ai_butler.agent.availability import AvailabilityInterpretationV1
 class ContextItemV1(BaseModel):
     ref: str
     text: str
-    trust_level: Literal["SYSTEM_FACT", "USER_CONTENT", "EXTERNAL_UNTRUSTED"]
+    trust_level: Literal["SYSTEM_FACT", "USER_CONTENT", "USER_DERIVED", "EXTERNAL_UNTRUSTED"]
     estimated_tokens: int = Field(ge=0)
 
 
@@ -71,10 +71,33 @@ class AgentStateV1(BaseModel):
     started_at: datetime
 
 
+class ShortTermStateV2(BaseModel):
+    """Checkpoint 中的 segment-scoped 执行状态；正文历史仍由业务库提供。"""
+
+    schema_version: Literal["2.0"] = "2.0"
+    current_run_id: UUID
+    user_id: UUID
+    conversation_id: UUID
+    segment_id: UUID
+    current_goal: str | None = None
+    confirmed_constraints: tuple[str, ...] = ()
+    decisions: tuple[str, ...] = ()
+    open_questions: tuple[str, ...] = ()
+    workflow_session_id: UUID | None = None
+    latest_summary_id: UUID | None = None
+    last_processed_message_id: UUID | None = None
+    context_manifest_id: UUID | None = None
+    last_completed_node: str | None = None
+    graph_version: str
+    prompt_bundle_version: str
+    tool_registry_version: str
+    policy_version: int = Field(default=1, gt=0)
+
+
 class ToolResultMetaV1(BaseModel):
     schema_version: Literal["1.0"] = "1.0"
     request_id: str
-    trust_level: Literal["SYSTEM_FACT", "USER_CONTENT", "EXTERNAL_UNTRUSTED"]
+    trust_level: Literal["SYSTEM_FACT", "USER_CONTENT", "USER_DERIVED", "EXTERNAL_UNTRUSTED"]
     provenance_refs: tuple[str, ...] = ()
     truncated: bool = False
     next_cursor: str | None = None

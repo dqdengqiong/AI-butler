@@ -1,11 +1,13 @@
+"""Scheduler 的通知、账号删除与私有知识作业。"""
+
 from __future__ import annotations
 
 import asyncio
 import hashlib
+from typing import Any
 from uuid import UUID, uuid5
 
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
-from langgraph.store.postgres.aio import AsyncPostgresStore
 from sqlalchemy import text
 
 from ai_butler.adapters.documents import SUPPORTED_RAG_MIME_TYPES, chunk_text, extract_text
@@ -14,85 +16,16 @@ from ai_butler.adapters.notification import Notification
 from ai_butler.adapters.vector import VectorPoint, VectorStoreError
 from ai_butler.agent.evidence import estimate_tokens
 
-from .context import ButlerContext
-from .memory import LongTermMemoryService
-from .retention import RetentionService
-from .rolling_schedule import RollingScheduleMixin
-from .shared import _row
+from ..shared import _row
 
 
-class SchedulerService(RollingScheduleMixin):
-    def __init__(self, context: ButlerContext) -> None:
-        self.database = context.database
-        self.settings = context.settings
-        self.embedding_provider = context.embedding_provider
-        self.vector_store = context.vector_store
-        self.notification_provider = context.notification_provider
-        self.memory = LongTermMemoryService(context)
-        self.retention = RetentionService(context)
-
-    async def scheduler_poll_once(self) -> bool:
-        """处理一个可安全重试的知识、记忆、通知或治理作业。"""
-
-        if await self._materialize_one_plan_window():
-            return True
-        if await self._delete_one_knowledge_vector():
-            return True
-        if await self._ingest_one_private_file():
-            return True
-        if await self._extract_one_memory():
-            return True
-        if await self._send_one_notification():
-            return True
-        if await self._run_one_account_deletion_step():
-            return True
-        return await self.retention.cleanup_once()
-
-    async def _extract_one_memory(self) -> bool:
-        async with self.database.transaction() as connection:
-            job = _row(
-                await connection.execute(
-                    text(
-                        "SELECT j.*,m.content FROM memory_extraction_jobs j "
-                        "JOIN messages m ON m.id=j.message_id "
-                        "WHERE (j.status IN ('PENDING','RETRY') OR "
-                        "(j.status='RUNNING' AND j.lease_expires_at<now())) "
-                        "AND COALESCE(j.next_attempt_at,j.created_at)<=now() ORDER BY j.created_at "
-                        "FOR UPDATE OF j SKIP LOCKED LIMIT 1"
-                    )
-                )
-            )
-            if job is None:
-                return False
-            await connection.execute(
-                text(
-                    "UPDATE memory_extraction_jobs SET status='RUNNING',attempt_count=attempt_count+1,"
-                    "lease_expires_at=now()+interval '5 minutes',updated_at=now() WHERE id=:id"
-                ),
-                {"id": job["id"]},
-            )
-        try:
-            await self.memory.extract_automatic(UUID(str(job["user_id"])), str(job["content"]))
-        except Exception:
-            async with self.database.transaction() as connection:
-                await connection.execute(
-                    text(
-                        "UPDATE memory_extraction_jobs SET status=CASE WHEN attempt_count>=3 THEN 'DEAD' "
-                        "ELSE 'RETRY' END,next_attempt_at=now()+interval '5 minutes',"
-                        "error_code='MEMORY_EXTRACTION_FAILED',updated_at=now() WHERE id=:id"
-                    ),
-                    {"id": job["id"]},
-                )
-        else:
-            async with self.database.transaction() as connection:
-                await connection.execute(
-                    text(
-                        "UPDATE memory_extraction_jobs SET status='SUCCEEDED',lease_expires_at=NULL,"
-                        "updated_at=now() WHERE id=:id"
-                    ),
-                    {"id": job["id"]},
-                )
-        return True
+class SchedulerOperationsMixin:
+    database: Any
+    settings: Any
+    notification_provider: Any
+    vector_store: Any
+    embedding_provider: Any
+    memory: Any
 
     async def _send_one_notification(self) -> bool:
         async with self.database.transaction() as connection:
@@ -229,13 +162,13 @@ class SchedulerService(RollingScheduleMixin):
             return
         if step == "STORE":
             namespace = ("users", str(user_id), "long_term_memory")
-            async with AsyncPostgresStore.from_conn_string(
-                self.settings.langgraph_database_url,
-                ttl={"refresh_on_read": False, "sweep_interval_minutes": 60},
-            ) as store:
-                memories = await store.asearch(namespace, limit=1000, refresh_ttl=False)
-                for memory in memories:
-                    await store.adelete(namespace, str(memory.key))
+            async with self.memory._store() as store:
+                while True:
+                    memories = await store.asearch(namespace, limit=100, refresh_ttl=False)
+                    if not memories:
+                        break
+                    for memory in memories:
+                        await store.adelete(namespace, str(memory.key))
             await self._advance_deletion(job, "QDRANT")
             return
         if step == "QDRANT":
@@ -306,9 +239,11 @@ class SchedulerService(RollingScheduleMixin):
                 "study_availability",
                 "user_profiles",
                 "stored_files",
+                "memory_control_records",
                 "memory_policy_state",
                 "memory_tombstones",
                 "memory_audit_records",
+                "user_profile_snapshots",
                 "auth_sessions",
                 "user_identities",
             ):
@@ -333,12 +268,6 @@ class SchedulerService(RollingScheduleMixin):
             )
 
     async def _delete_one_knowledge_vector(self) -> bool:
-        """先隐藏删除中的资料，再清理 Qdrant，最后删除 PostgreSQL 文档投影。
-
-        Qdrant 失败时文档保留 ``DELETING`` 供 Scheduler 重试；检索查询只接受
-        ``READY``，因此失败不会让已删除资料重新可见。
-        """
-
         async with self.database.transaction() as connection:
             document = _row(
                 await connection.execute(
@@ -372,12 +301,6 @@ class SchedulerService(RollingScheduleMixin):
         return True
 
     async def _ingest_one_private_file(self) -> bool:
-        """领取并入库一个 CLEAN 私有资料，网络与解析工作均在事务外执行。
-
-        ``knowledge_documents.stored_file_id`` 唯一约束使重复调度只复用同一文档；
-        chunk/point ID 根据内容稳定生成，Worker 崩溃后的重试不会产生重复向量。
-        """
-
         async with self.database.transaction() as connection:
             file = _row(
                 await connection.execute(
@@ -417,7 +340,6 @@ class SchedulerService(RollingScheduleMixin):
                     "file_id": file["id"],
                 },
             )
-
         try:
             path = (self.settings.object_storage_local_path / file["object_key"]).resolve()
             root = self.settings.object_storage_local_path.resolve()

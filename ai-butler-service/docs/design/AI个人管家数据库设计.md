@@ -6,6 +6,8 @@
 
 - 交互事实：`conversations`、`conversation_segments`、`messages`、`agent_runs`、run 事件、trace、模型审计。
 - 计划事实：`goals`、`plans`、`plan_revisions`、`plan_stages`、`task_templates`、`tasks`、`claims`、`citations`、`notification_jobs`。
+- 可重建短期事实：`conversation_working_states`、`workflow_sessions`、`context_manifests` 和三类 `conversation_summaries`。
+- 长期记忆控制面：`memory_control_records`、`memory_tombstones`、`memory_policy_state`、`memory_extraction_jobs`、`memory_audit_records` 和可丢弃的 `user_profile_snapshots`。
 
 `PlanPreviewCard` 作为 Assistant 消息中的只读 JSON 快照保存，不单独创建计划草稿表。
 
@@ -67,3 +69,15 @@
 ## 6. 初始结构
 
 项目未上线，唯一的 `0001_initial_schema.py` 就是当前结构来源。开发和测试数据库从该结构重建，不提供旧 schema 数据迁移。
+
+## 7. LangGraph 与业务表职责
+
+LangGraph Checkpointer 和 Store 使用独立的 LangGraph PostgreSQL 数据库。Checkpointer 的 thread 是恢复缓存，不是消息数据库；Store 的正文和向量不是权限事实。业务数据库是会话、workflow、工作状态、记忆可见性和遗忘屏障的权威源。
+
+`memory_control_records` 不保存正文，只保存 `store_key`、slot/statement hash、category、status、revision、source type、policy generation、TTL、来源 conversation 和 Store 清理时间。状态只允许 `PENDING`、`ACTIVE`、`CONFLICTED`、`DELETED`、`EXPIRED`。PENDING 永不参与检索。
+
+`memory_tombstones` 区分 SLOT 与 USER 范围。`memory_policy_state` 保存自动提取开关、generation、`forget_before` 和画像快照状态。所有并发写入和遗忘先取得用户级 advisory lock，并通过 revision/generation CAS 防止旧作业复活记忆。
+
+`conversation_working_states` 对 conversation 唯一，并带 segment、state version、目标、约束、决策、问题、workflow/summary/message 引用和 graph/prompt/tool/policy 版本。Checkpoint 不存在时由这些字段和消息/摘要重建。
+
+`context_manifests` 按 run 和任务记录目标/硬预算、最终估算 Token、选中引用及是否发生裁剪，不保存 Prompt 或正文，用于验证 4K/8K/10K/12K 硬上限。

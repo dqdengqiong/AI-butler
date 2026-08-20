@@ -22,6 +22,7 @@ export type MessageListResponse = components['schemas']['MessageListResponse']
 export type MessageResponse = components['schemas']['MessageResponse']
 export type SendMessageResponse = components['schemas']['SendMessageResponse']
 export type PlanConfirmationResponse = components['schemas']['PlanConfirmationResponseV1']
+export type DailyAvailabilityResponse = components['schemas']['DailyAvailabilityV1']
 export type AuthConfigResponse = components['schemas']['AuthConfigResponse']
 export type PhoneVerificationCodeResponse = components['schemas']['PhoneVerificationCodeResponse']
 

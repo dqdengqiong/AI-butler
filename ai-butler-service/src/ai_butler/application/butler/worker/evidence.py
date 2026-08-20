@@ -1,3 +1,5 @@
+"""Worker 的证据生成、校验与持久化。"""
+
 from __future__ import annotations
 
 import json
@@ -18,13 +20,13 @@ from ai_butler.adapters.llm import (
 from ai_butler.agent.evidence import NumberedEvidence, RagAnswerV1
 from ai_butler.domain.errors import ButlerError
 
-from .bootstrap import BootstrapService
-from .completion import CompletionService
-from .context import ButlerContext
-from .events import EventService
-from .shared import (
+from ..bootstrap import BootstrapService
+from ..context import ButlerContext
+from ..events import EventService
+from ..shared import (
     PUBLIC_CHUNK_ID,
 )
+from .completion import CompletionService
 
 
 class EvidenceExecutionService:

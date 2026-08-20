@@ -5,6 +5,16 @@ from __future__ import annotations
 import json
 import re
 from datetime import UTC, datetime, timedelta
+from typing import TypedDict
+
+
+class _FakeAvailabilityRule(TypedDict):
+    """Fake 提取器使用的规则形状，与 availability-v2 测试契约保持一致。"""
+
+    days: list[int]
+    available_minutes: int | None
+    start_time: str | None
+    end_time: str | None
 
 
 def fake_research_response(prompt: str) -> str:
@@ -34,8 +44,103 @@ def fake_research_response(prompt: str) -> str:
     )
 
 
+_DURATION_NUMBER = r"(?:\d+(?:\.\d+)?|[一二两三四五六七八九十]+)"
+_NEGATIVE_TIME = re.compile(r"不学习|不学|休息|不安排")
+_DAY_NUMBER = {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "日": 7, "天": 7}
+
+
+def _fake_number(value: str) -> float:
+    """解析测试语料使用的常见中文数字，不承担生产业务判断。"""
+
+    if value[0].isdigit():
+        return float(value)
+    normalized = value.replace("两", "二")
+    digits = {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
+    if normalized == "十":
+        return 10
+    if "十" in normalized:
+        left, right = normalized.split("十", 1)
+        return (digits.get(left, 1) * 10) + digits.get(right, 0)
+    return float(digits[normalized])
+
+
+def _fake_duration(value: str) -> int | None:
+    """把唯一的小时/分钟表达换算为分钟；区间返回 ``None``。"""
+
+    range_pattern = (
+        rf"{_DURATION_NUMBER}\s*[~～—-]|"
+        rf"{_DURATION_NUMBER}\s*(?:到|至)\s*{_DURATION_NUMBER}\s*(?:小时|分钟)"
+    )
+    if re.search(range_pattern, value):
+        return None
+    if re.search(r"(?:一个|一|1个?)半小时", value):
+        return 90
+    if "半小时" in value:
+        return 30
+    hours = re.search(rf"({_DURATION_NUMBER})\s*个?\s*小时", value)
+    minutes = re.search(rf"({_DURATION_NUMBER})\s*分钟", value)
+    total = 0.0
+    if hours:
+        total += _fake_number(hours.group(1)) * 60
+    if minutes:
+        total += _fake_number(minutes.group(1))
+    return int(total) if total > 0 and total.is_integer() else None
+
+
+def _fake_days(value: str) -> tuple[int, ...]:
+    """识别 Fake LLM 基准集中的常见星期范围。"""
+
+    if re.search(r"工作日|平日|周一\s*(?:到|至|[-—])\s*周五", value):
+        return (1, 2, 3, 4, 5)
+    if "周末" in value:
+        return (6, 7)
+    if re.search(r"每天|每日|天天", value):
+        return (1, 2, 3, 4, 5, 6, 7)
+    days = tuple(
+        dict.fromkeys(
+            _DAY_NUMBER[item] for item in re.findall(r"(?:周|星期)([一二三四五六日天])", value)
+        )
+    )
+    return days
+
+
+def _fake_time_range(value: str) -> tuple[str, str] | None:
+    """解析带“点”或冒号的日内时段；跨午夜交给澄清分支。"""
+
+    match = re.search(
+        r"(?P<qualifier>早上|上午|中午|下午|晚上)?\s*"
+        r"(?P<start>\d{1,2})(?::(?P<start_colon>\d{2})|点(?P<start_point>半|\d{1,2})?)"
+        r"\s*(?:到|至|[-—])\s*"
+        r"(?P<end_qualifier>早上|上午|中午|下午|晚上)?\s*"
+        r"(?P<end>\d{1,2})(?::(?P<end_colon>\d{2})|点(?P<end_point>半|\d{1,2})?)",
+        value,
+    )
+    if match is None:
+        return None
+
+    def clock(hour_value: str, minute_value: str | None, qualifier: str | None) -> int:
+        hour = int(hour_value)
+        minute = 30 if minute_value == "半" else int(minute_value or 0)
+        if qualifier in {"下午", "晚上"} and hour < 12:
+            hour += 12
+        return hour * 60 + minute
+
+    qualifier = match.group("qualifier")
+    start = clock(
+        match.group("start"), match.group("start_colon") or match.group("start_point"), qualifier
+    )
+    end = clock(
+        match.group("end"),
+        match.group("end_colon") or match.group("end_point"),
+        match.group("end_qualifier") or qualifier,
+    )
+    if start >= end or end > 24 * 60:
+        return None
+    return f"{start // 60:02d}:{start % 60:02d}:00", f"{end // 60:02d}:{end % 60:02d}:00"
+
+
 def fake_availability_response(prompt: str) -> str:
-    """为本地和测试环境模拟时间提取，不调用外部模型或保存用户原文。"""
+    """为本地和测试环境模拟 v2 时间提取，不调用外部模型或保存用户原文。"""
 
     marker = "USER_INPUT:\n"
     try:
@@ -43,91 +148,113 @@ def fake_availability_response(prompt: str) -> str:
     except (IndexError, json.JSONDecodeError):
         user_input = ""
 
-    def duration(match: re.Match[str] | None) -> int:
-        if match is None:
-            return 0
-        return int(match.group(1)) * (60 if match.group(2) == "小时" else 1)
-
-    weekday = re.search(r"工作日[^，。；\n]*?(\d+)\s*个?\s*(小时|分钟)", user_input)
-    weekend = re.search(r"周末[^，。；\n]*?(\d+)\s*个?\s*(小时|分钟)", user_input)
-    general = re.search(r"(\d+)\s*个?\s*(小时|分钟)", user_input)
-    total = re.search(r"每周[^，。；\n]*?(\d+)\s*个?\s*(小时|分钟)", user_input)
-    windows: list[dict[str, object]] = []
-    excluded: tuple[int, ...] = ()
-    if weekday:
-        windows.extend(
-            {
-                "day_of_week": day,
-                "available_minutes": duration(weekday),
-                "start_time": None,
-                "end_time": None,
-            }
-            for day in range(1, 6)
-        )
-    if weekend and not re.search(r"周末.*(?:不学习|不学|休息|不安排)", user_input):
-        windows.extend(
-            {
-                "day_of_week": day,
-                "available_minutes": duration(weekend),
-                "start_time": None,
-                "end_time": None,
-            }
-            for day in (6, 7)
-        )
-    elif re.search(r"周末.*(?:不学习|不学|休息|不安排)", user_input):
-        excluded = (6, 7)
-    if weekday and not weekend:
-        excluded = (6, 7)
-    elif weekend and not weekday:
-        excluded = (1, 2, 3, 4, 5)
-    if not windows and general and "每天" in user_input:
-        windows.extend(
-            {
-                "day_of_week": day,
-                "available_minutes": duration(general),
-                "start_time": None,
-                "end_time": None,
-            }
-            for day in range(1, 8)
-        )
-    excluded_dates = sorted(
-        set(
-            re.findall(
-                r"(20\d{2}-\d{2}-\d{2})(?=[^。；;]{0,12}(?:不学习|不学|休息|不安排))",
-                user_input,
+    excluded: set[int] = set()
+    excluded_dates: set[str] = set()
+    clauses = [item.strip() for item in re.split(r"[，。；;\n]", user_input) if item.strip()]
+    for clause in clauses:
+        if not _NEGATIVE_TIME.search(clause):
+            continue
+        excluded.update(_fake_days(clause))
+        date_match = re.search(r"(20\d{2})[-年](\d{1,2})[-月](\d{1,2})日?", clause)
+        if date_match:
+            excluded_dates.add(
+                f"{int(date_match.group(1)):04d}-{int(date_match.group(2)):02d}-{int(date_match.group(3)):02d}"
             )
+        elif re.search(r"(?<!\d)\d{1,2}月\d{1,2}日", clause):
+            return json.dumps(
+                {
+                    "schema_version": "2.0",
+                    "status": "NEEDS_CLARIFICATION",
+                    "weekly_minutes": None,
+                    "rules": [],
+                    "excluded_days": sorted(excluded),
+                    "excluded_dates": sorted(excluded_dates),
+                    "question": "请补充例外日期的年份。",
+                },
+                ensure_ascii=False,
+            )
+
+    rules: list[_FakeAvailabilityRule] = []
+    conflict = False
+    for clause in clauses:
+        if _NEGATIVE_TIME.search(clause):
+            continue
+        days = _fake_days(clause)
+        if not days:
+            continue
+        time_range = _fake_time_range(clause)
+        minutes = _fake_duration(clause)
+        if time_range is None and minutes is None:
+            continue
+        candidate: _FakeAvailabilityRule = {
+            "days": list(days),
+            "available_minutes": minutes,
+            "start_time": time_range[0] if time_range else None,
+            "end_time": time_range[1] if time_range else None,
+        }
+        overlapping = [item for item in rules if set(item["days"]) & set(days)]
+        if overlapping and re.search(r"改成|调整为|不是.+是", clause):
+            rules = [item for item in rules if not set(item["days"]) & set(days)]
+        elif overlapping and any(item != candidate for item in overlapping):
+            conflict = True
+        if candidate not in rules:
+            rules.append(candidate)
+
+    # 支持用户先回答“每天”，下一轮只补“2小时”的自然对话。
+    if not rules:
+        days = _fake_days(user_input)
+        time_range = _fake_time_range(user_input)
+        minutes = _fake_duration(user_input)
+        if days and (time_range is not None or minutes is not None):
+            rules.append(
+                {
+                    "days": list(days),
+                    "available_minutes": minutes,
+                    "start_time": time_range[0] if time_range else None,
+                    "end_time": time_range[1] if time_range else None,
+                }
+            )
+
+    weekly_clause = next((item for item in clauses if "每周" in item), "")
+    weekly_minutes = _fake_duration(weekly_clause) if weekly_clause else None
+    vague = bool(re.search(r"有空就学|学一会", user_input))
+    ranged = bool(
+        re.search(
+            rf"{_DURATION_NUMBER}\s*(?:[~～—-]|到|至)\s*{_DURATION_NUMBER}\s*(?:小时|分钟)",
+            user_input,
         )
     )
-    if total and not windows:
-        result = {
-            "schema_version": "1.0",
-            "status": "COMPLETE",
-            "weekly_minutes": duration(total),
-            "windows": [],
-            "excluded_days": [],
-            "excluded_dates": excluded_dates,
-            "question": None,
-        }
-    elif windows:
-        result = {
-            "schema_version": "1.0",
-            "status": "COMPLETE",
-            "weekly_minutes": None,
-            "windows": windows,
-            "excluded_days": list(excluded),
-            "excluded_dates": excluded_dates,
-            "question": None,
-        }
+    cross_midnight = bool(
+        re.search(r"晚上[^，。；\n]*(?:到|至|[-—])[^，。；\n]*(?:凌晨|早上)", user_input)
+    )
+    if conflict or vague or ranged or cross_midnight:
+        question = "学习时长存在多种理解，请明确要按多少分钟计算。"
+        status = "NEEDS_CLARIFICATION"
+    elif not rules and weekly_minutes is None:
+        scope = _fake_days(user_input)
+        question = (
+            f"{('每天' if scope == tuple(range(1, 8)) else '这些天')}可以学习多少小时或分钟？"
+            if scope
+            else "请说明每天或每周可以投入多少小时或分钟。"
+        )
+        status = "NEEDS_CLARIFICATION"
     else:
-        result = {
-            "schema_version": "1.0",
-            "status": "NEEDS_CLARIFICATION",
-            "weekly_minutes": None,
-            "windows": [],
-            "excluded_days": [],
-            "excluded_dates": excluded_dates,
-            "question": "请说明每天或每周可以投入多少小时或分钟。",
-        }
+        question, status = None, "COMPLETE"
+
+    covered = {day for rule in rules for day in rule["days"]}
+    if covered == set(range(1, 6)):
+        excluded.update((6, 7))
+    elif covered == {6, 7}:
+        excluded.update(range(1, 6))
+    result = {
+        "schema_version": "2.0",
+        "status": status,
+        "weekly_minutes": weekly_minutes,
+        "rules": rules,
+        "excluded_days": sorted(excluded),
+        "excluded_dates": sorted(excluded_dates),
+        "question": question,
+    }
     return json.dumps(result, ensure_ascii=False)
 
 

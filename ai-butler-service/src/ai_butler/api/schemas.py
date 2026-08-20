@@ -8,6 +8,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field, StringConstraints, model_validator
 
+from ai_butler.agent.availability import DailyAvailabilityV1
+
 NonEmpty = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 
 
@@ -261,6 +263,7 @@ class PlanPreviewCardPayloadV1(BaseModel):
     target_plan_id: UUID | None = None
     expected_current_revision_id: UUID | None = None
     availability: dict[str, object]
+    daily_availability: list[DailyAvailabilityV1] = Field(default_factory=list)
     scenario_code: str
     scenario_fields: dict[str, str]
     evidence: list[dict[str, object]] = Field(default_factory=list)

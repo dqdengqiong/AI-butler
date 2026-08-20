@@ -688,6 +688,48 @@
         "title": "ConversationTransitionResponse",
         "type": "object"
       },
+      "DailyAvailabilityV1": {
+        "additionalProperties": false,
+        "description": "一个本地日历日的可投入分钟数及其确定性来源。",
+        "properties": {
+          "available_minutes": {
+            "maximum": 1440.0,
+            "minimum": 0.0,
+            "title": "Available Minutes",
+            "type": "integer"
+          },
+          "date": {
+            "format": "date",
+            "title": "Date",
+            "type": "string"
+          },
+          "day_of_week": {
+            "maximum": 7.0,
+            "minimum": 1.0,
+            "title": "Day Of Week",
+            "type": "integer"
+          },
+          "source": {
+            "enum": [
+              "EXPLICIT_RULE",
+              "WEEKLY_EVEN_SPLIT",
+              "EXCLUDED_WEEKDAY",
+              "EXCLUDED_DATE",
+              "NO_RULE"
+            ],
+            "title": "Source",
+            "type": "string"
+          }
+        },
+        "required": [
+          "date",
+          "day_of_week",
+          "available_minutes",
+          "source"
+        ],
+        "title": "DailyAvailabilityV1",
+        "type": "object"
+      },
       "DeleteAccountRequest": {
         "properties": {
           "confirmation": {
@@ -1028,6 +1070,13 @@
             "exclusiveMinimum": 0.0,
             "title": "Available Weekly Minutes",
             "type": "integer"
+          },
+          "daily_availability": {
+            "items": {
+              "$ref": "#/components/schemas/DailyAvailabilityV1"
+            },
+            "title": "Daily Availability",
+            "type": "array"
           },
           "evidence": {
             "items": {

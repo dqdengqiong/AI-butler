@@ -36,6 +36,40 @@ async def test_requirement_collector_is_reused_by_a_second_scenario() -> None:
     assert result.data.scenario_fields == {"target_band": "7.5"}  # type: ignore[union-attr]
 
 
+@pytest.mark.asyncio
+async def test_requirement_collector_hydrates_structured_workflow_slots() -> None:
+    collector = PlanRequirementCollector(AvailabilityInterpreter(FakeLLM()))
+    first = await collector.collect(
+        current_input="准备2027年广东省考",
+        recent_messages=(),
+        start_date=date(2026, 8, 19),
+    )
+    assert first.status == "NEEDS_CLARIFICATION"
+    assert isinstance(first.data, dict)
+    second = await collector.collect(
+        current_input="准备3个月，每天学习2小时",
+        recent_messages=(),
+        start_date=date(2026, 8, 19),
+        existing_slots=first.data,
+    )
+    assert second.status == "COMPLETED"
+
+
+@pytest.mark.asyncio
+async def test_complete_current_availability_replaces_older_message_value() -> None:
+    collector = PlanRequirementCollector(AvailabilityInterpreter(FakeLLM()))
+
+    result = await collector.collect(
+        current_input="调整我的计划：2027年广东省考，准备10周，每天可学习2小时",
+        recent_messages=("USER: 2027年广东省考，准备12周，工作日每天1小时，周末每天2小时",),
+        start_date=date(2026, 8, 19),
+    )
+
+    assert result.status == "COMPLETED"
+    assert result.data is not None
+    assert result.data.availability.weekly_minutes == 840  # type: ignore[union-attr]
+
+
 def test_schedule_window_is_deterministic_and_respects_eighty_five_percent() -> None:
     start = date(2026, 8, 17)
     stages = (
@@ -107,6 +141,36 @@ def test_schedule_window_respects_explicit_excluded_dates() -> None:
         window_end=start + timedelta(days=6),
     )
     assert date(2026, 8, 19) not in {task.scheduled_date for task in tasks}
+
+
+def test_schedule_window_uses_exact_weekly_remainder_distribution() -> None:
+    start = date(2026, 8, 17)
+    tasks, unscheduled = schedule_plan_window(
+        revision_ref="revision",
+        templates=(
+            {
+                "stage_key": "stage_1",
+                "template_key": "template_1",
+                "title": "任务",
+                "expected_minutes": 44,
+                "priority": 1,
+                "frequency": {"days_per_week": 3},
+            },
+        ),
+        stages=(
+            {"stage_key": "stage_1", "start_date": start, "end_date": start + timedelta(days=6)},
+        ),
+        availability={"weekly_minutes": 360, "windows": [], "excluded_days": []},
+        window_start=start,
+        window_end=start + timedelta(days=6),
+    )
+
+    assert [item.scheduled_date for item in tasks] == [
+        date(2026, 8, 17),
+        date(2026, 8, 18),
+        date(2026, 8, 19),
+    ]
+    assert not unscheduled
 
 
 def test_registry_maps_intent_and_context_to_a_fixed_call_plan() -> None:

@@ -11,7 +11,7 @@ from sqlalchemy import text
 from ai_butler.infrastructure.database import AsyncDatabase
 from ai_butler.tools import DEFAULT_TOOL_REGISTRY, schedule_plan_window
 
-from .shared import _json, _row
+from ..shared import _json, _row
 
 
 class RollingScheduleMixin:

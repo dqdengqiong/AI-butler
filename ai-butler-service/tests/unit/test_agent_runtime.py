@@ -4,7 +4,8 @@ from uuid import UUID
 import pytest
 
 from ai_butler.agent.contracts import ContextBundleV1, ContextItemV1
-from ai_butler.agent.runtime import ContextBudgetGuard, MemoryCandidate, MemoryPolicy
+from ai_butler.agent.runtime import ContextBudgetGuard
+from ai_butler.application.butler.memory import MemoryCandidate, MemoryPolicy
 from ai_butler.domain.errors import ButlerError
 from ai_butler.tools import DEFAULT_TOOL_REGISTRY
 
@@ -43,6 +44,8 @@ def test_required_context_fails_closed_when_over_budget() -> None:
     )
     with pytest.raises(ButlerError, match="必要上下文"):
         ContextBudgetGuard(512).compact(bundle)
+    expanded = ContextBudgetGuard(512, 700).compact(bundle)
+    assert expanded.current_input.ref == "input"
 
 
 def test_tool_gate_allows_only_registered_intent_node_pairs() -> None:

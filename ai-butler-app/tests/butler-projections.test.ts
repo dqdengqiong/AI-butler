@@ -61,6 +61,21 @@ describe('stateless chat projections', () => {
                 start_date: '2026-08-18',
                 end_date: '2026-09-15',
               },
+              daily_availability: [
+                {
+                  date: '2026-08-18',
+                  day_of_week: 2,
+                  available_minutes: 60,
+                  source: 'EXPLICIT_RULE',
+                },
+                {
+                  date: '2026-08-19',
+                  day_of_week: 3,
+                  available_minutes: 0,
+                  source: 'EXCLUDED_DATE',
+                },
+                { date: '', day_of_week: 8, available_minutes: -1, source: 'INVALID' },
+              ],
               warnings: [],
             },
             actions: [],
@@ -73,6 +88,20 @@ describe('stateless chat projections', () => {
       messageId: 'preview-message',
       status: 'READY',
       weeklyMinutes: 255,
+      dailyAvailability: [
+        {
+          date: '2026-08-18',
+          dayOfWeek: 2,
+          availableMinutes: 60,
+          source: 'EXPLICIT_RULE',
+        },
+        {
+          date: '2026-08-19',
+          dayOfWeek: 3,
+          availableMinutes: 0,
+          source: 'EXCLUDED_DATE',
+        },
+      ],
     })
   })
 

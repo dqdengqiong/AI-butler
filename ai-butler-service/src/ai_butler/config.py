@@ -81,13 +81,28 @@ class Settings(BaseSettings):
     sse_poll_interval_ms: int = 250
     worker_poll_interval_ms: int = 500
     worker_lease_seconds: int = 600
-    context_window_tokens: int = 16_000
+    # 节点级上下文目标/硬上限；模型物理窗口不再作为应用预算。
+    context_window_tokens: int = 12_000
     context_soft_limit_ratio: float = 0.70
     context_hard_limit_ratio: float = 0.85
+    message_input_max_tokens: int = 1_800
+    router_context_target_tokens: int = 2_000
+    router_context_hard_tokens: int = 4_000
+    extractor_context_target_tokens: int = 2_000
+    extractor_context_hard_tokens: int = 4_000
+    general_context_target_tokens: int = 4_000
+    general_context_hard_tokens: int = 8_000
+    planning_context_target_tokens: int = 6_000
+    planning_context_hard_tokens: int = 10_000
+    research_context_target_tokens: int = 8_000
+    research_context_hard_tokens: int = 12_000
+    segment_summary_trigger_tokens: int = 3_000
+    segment_rotation_tokens: int = 8_000
     conversation_topic_idle_seconds: int = 86_400
     conversation_topic_confidence: float = 0.85
     event_retention_days: int = 7
     checkpoint_retention_days: int = 7
+    deleted_conversation_retention_days: int = 30
     run_trace_retention_days: int = 30
     memory_audit_retention_days: int = 90
     memory_preference_ttl_days: int = 180
@@ -126,6 +141,19 @@ class Settings(BaseSettings):
             raise ValueError("conversation topic idle threshold must be at least one hour")
         if not 0 < self.context_soft_limit_ratio < self.context_hard_limit_ratio <= 0.95:
             raise ValueError("context limits must satisfy 0 < soft < hard <= 0.95")
+        budgets = (
+            (self.router_context_target_tokens, self.router_context_hard_tokens),
+            (self.extractor_context_target_tokens, self.extractor_context_hard_tokens),
+            (self.general_context_target_tokens, self.general_context_hard_tokens),
+            (self.planning_context_target_tokens, self.planning_context_hard_tokens),
+            (self.research_context_target_tokens, self.research_context_hard_tokens),
+        )
+        if any(target < 256 or hard < target for target, hard in budgets):
+            raise ValueError("context budgets must satisfy 256 <= target <= hard")
+        if not 256 <= self.message_input_max_tokens <= self.router_context_target_tokens:
+            raise ValueError("message input token limit must fit the router target budget")
+        if not 0 < self.segment_summary_trigger_tokens < self.segment_rotation_tokens:
+            raise ValueError("segment summary trigger must be below rotation limit")
         retention_days = (
             self.event_retention_days,
             self.checkpoint_retention_days,

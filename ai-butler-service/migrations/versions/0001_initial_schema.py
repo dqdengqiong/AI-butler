@@ -82,6 +82,13 @@ def upgrade() -> None:
           CHECK(start_time IS NULL OR end_time>start_time),
           CHECK(effective_to IS NULL OR effective_to>=effective_from)
         );
+        CREATE TABLE user_profile_snapshots (
+          user_id uuid PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+          status varchar(16) NOT NULL DEFAULT 'STALE' CHECK(status IN ('FRESH','STALE')),
+          policy_generation bigint NOT NULL DEFAULT 1 CHECK(policy_generation>0),
+          profile_data jsonb NOT NULL DEFAULT '{}',
+          created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now()
+        );
 
         CREATE TABLE agent_definitions (
           id uuid PRIMARY KEY, code varchar(64) NOT NULL, version integer NOT NULL CHECK(version>0),
@@ -130,7 +137,9 @@ def upgrade() -> None:
           status varchar(16) NOT NULL CHECK(status IN ('ACTIVE','ARCHIVING','ARCHIVED')),
           estimated_context_tokens integer NOT NULL DEFAULT 0 CHECK(estimated_context_tokens>=0),
           start_message_id uuid, end_message_id uuid, final_summary_id uuid,
-          archive_reason varchar(32), created_at timestamptz NOT NULL DEFAULT now(), archived_at timestamptz,
+          archive_reason varchar(32), checkpoint_delete_requested_at timestamptz,
+          checkpoint_deleted_at timestamptz,
+          created_at timestamptz NOT NULL DEFAULT now(), archived_at timestamptz,
           UNIQUE(conversation_id,sequence)
         );
         CREATE UNIQUE INDEX uq_conversation_active_segment ON conversation_segments(conversation_id)
@@ -181,8 +190,8 @@ def upgrade() -> None:
           status varchar(24) NOT NULL CHECK(status IN
             ('QUEUED','RUNNING','SUCCEEDED','FAILED_RETRYABLE','FAILED_FINAL',
              'CANCEL_REQUESTED','CANCELLED')),
-          graph_version varchar(32) NOT NULL DEFAULT 'butler-graph-v1',
-          prompt_bundle_version varchar(32) NOT NULL DEFAULT 'butler-prompts-v1',
+          graph_version varchar(32) NOT NULL DEFAULT 'butler-graph-v2',
+          prompt_bundle_version varchar(32) NOT NULL DEFAULT 'butler-prompts-v2',
           tool_registry_version varchar(32) NOT NULL DEFAULT '2.0',
           tool_registry_fingerprint char(64) NOT NULL,
           model_provider varchar(64), model_name varchar(256), last_node varchar(64),
@@ -203,6 +212,51 @@ def upgrade() -> None:
         CREATE UNIQUE INDEX uq_user_executing_run ON agent_runs(user_id)
           WHERE status IN ('QUEUED','RUNNING','CANCEL_REQUESTED');
         CREATE INDEX ix_agent_runs_queue ON agent_runs(status,lease_expires_at,created_at);
+
+        CREATE TABLE workflow_sessions (
+          id uuid PRIMARY KEY, user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          conversation_id uuid NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+          segment_id uuid NOT NULL REFERENCES conversation_segments(id) ON DELETE CASCADE,
+          workflow_type varchar(48) NOT NULL,
+          status varchar(24) NOT NULL CHECK(status IN
+            ('ACTIVE','WAITING_INPUT','COMPLETED','CANCELLED','EXPIRED')),
+          slots jsonb NOT NULL DEFAULT '{}', version integer NOT NULL DEFAULT 1 CHECK(version>0),
+          expires_at timestamptz, completed_at timestamptz,
+          created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now()
+        );
+        CREATE INDEX ix_workflow_sessions_active
+          ON workflow_sessions(user_id,conversation_id,updated_at DESC)
+          WHERE status IN ('ACTIVE','WAITING_INPUT');
+        CREATE TABLE conversation_working_states (
+          conversation_id uuid PRIMARY KEY REFERENCES conversations(id) ON DELETE CASCADE,
+          user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          segment_id uuid NOT NULL REFERENCES conversation_segments(id) ON DELETE CASCADE,
+          state_version integer NOT NULL DEFAULT 1 CHECK(state_version>0),
+          current_goal text, confirmed_constraints jsonb NOT NULL DEFAULT '[]',
+          decisions jsonb NOT NULL DEFAULT '[]', open_questions jsonb NOT NULL DEFAULT '[]',
+          workflow_session_id uuid REFERENCES workflow_sessions(id) ON DELETE SET NULL,
+          latest_summary_id uuid REFERENCES conversation_summaries(id) ON DELETE SET NULL,
+          last_processed_message_id uuid REFERENCES messages(id) ON DELETE SET NULL,
+          context_manifest_id uuid, last_completed_node varchar(64),
+          graph_version varchar(32) NOT NULL, prompt_bundle_version varchar(32) NOT NULL,
+          tool_registry_version varchar(32) NOT NULL, policy_version integer NOT NULL DEFAULT 1,
+          created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now()
+        );
+        CREATE INDEX ix_working_states_user_segment
+          ON conversation_working_states(user_id,segment_id);
+        CREATE TABLE context_manifests (
+          id uuid PRIMARY KEY, user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          agent_run_id uuid NOT NULL REFERENCES agent_runs(id) ON DELETE CASCADE,
+          segment_id uuid NOT NULL REFERENCES conversation_segments(id) ON DELETE CASCADE,
+          task_kind varchar(16) NOT NULL CHECK(task_kind IN
+            ('ROUTER','GENERAL','PLANNING','RESEARCH')),
+          target_tokens integer NOT NULL CHECK(target_tokens>0),
+          hard_tokens integer NOT NULL CHECK(hard_tokens>=target_tokens),
+          estimated_tokens integer NOT NULL CHECK(estimated_tokens>=0),
+          selected_refs jsonb NOT NULL DEFAULT '[]', truncated boolean NOT NULL DEFAULT false,
+          created_at timestamptz NOT NULL DEFAULT now()
+        );
+        CREATE INDEX ix_context_manifests_run ON context_manifests(agent_run_id,created_at DESC);
         CREATE TABLE agent_run_events (
           id bigserial PRIMARY KEY, agent_run_id uuid NOT NULL REFERENCES agent_runs(id) ON DELETE CASCADE,
           user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -374,12 +428,37 @@ def upgrade() -> None:
 
         CREATE TABLE memory_policy_state (
           user_id uuid PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
-          enabled boolean NOT NULL DEFAULT true, version integer NOT NULL DEFAULT 1 CHECK(version>0),
+          automatic_enabled boolean NOT NULL DEFAULT true,
+          policy_generation bigint NOT NULL DEFAULT 1 CHECK(policy_generation>0),
+          forget_before timestamptz,
+          profile_snapshot_status varchar(16) NOT NULL DEFAULT 'STALE'
+            CHECK(profile_snapshot_status IN ('FRESH','STALE')),
           updated_at timestamptz NOT NULL DEFAULT now()
         );
+        CREATE TABLE memory_control_records (
+          id uuid PRIMARY KEY, user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          store_key char(64) NOT NULL, slot_key_hash char(64) NOT NULL,
+          statement_hash char(64) NOT NULL,
+          category varchar(24) NOT NULL CHECK(category IN
+            ('PREFERENCE','HABIT','CONSTRAINT','BACKGROUND')),
+          status varchar(16) NOT NULL CHECK(status IN
+            ('PENDING','ACTIVE','CONFLICTED','DELETED','EXPIRED')),
+          revision integer NOT NULL CHECK(revision>0),
+          source_type varchar(16) NOT NULL CHECK(source_type IN ('EXPLICIT','AUTOMATIC')),
+          policy_generation bigint NOT NULL CHECK(policy_generation>0),
+          expires_at timestamptz, source_conversation_id uuid
+            REFERENCES conversations(id) ON DELETE SET NULL,
+          store_deleted_at timestamptz,
+          created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now(),
+          UNIQUE(user_id,store_key)
+        );
+        CREATE INDEX ix_memory_control_retrieval
+          ON memory_control_records(user_id,status,expires_at,updated_at DESC);
         CREATE TABLE memory_extraction_jobs (
           id uuid PRIMARY KEY, user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
           message_id uuid NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+          source_conversation_id uuid REFERENCES conversations(id) ON DELETE CASCADE,
+          policy_generation bigint NOT NULL CHECK(policy_generation>0),
           status varchar(16) NOT NULL DEFAULT 'PENDING'
             CHECK(status IN ('PENDING','RUNNING','RETRY','SUCCEEDED','DEAD')),
           attempt_count smallint NOT NULL DEFAULT 0, worker_id uuid, lease_expires_at timestamptz,
@@ -389,8 +468,10 @@ def upgrade() -> None:
         );
         CREATE TABLE memory_tombstones (
           id uuid PRIMARY KEY, user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-          normalized_key varchar(255) NOT NULL, reason varchar(32) NOT NULL,
-          created_at timestamptz NOT NULL DEFAULT now(), UNIQUE(user_id,normalized_key)
+          scope varchar(16) NOT NULL DEFAULT 'SLOT' CHECK(scope IN ('SLOT','USER')),
+          slot_key_hash char(64) NOT NULL, statement_hash char(64), reason varchar(32) NOT NULL,
+          policy_generation bigint NOT NULL CHECK(policy_generation>0),
+          created_at timestamptz NOT NULL DEFAULT now(), UNIQUE(user_id,scope,slot_key_hash)
         );
         CREATE TABLE memory_audit_records (
           id uuid PRIMARY KEY, user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,

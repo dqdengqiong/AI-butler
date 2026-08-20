@@ -60,6 +60,9 @@ describe('chat entry layout', () => {
   it('shows the confirmed period and weekly investment on plan cards', () => {
     expect(planTemplate).toContain('{{ item.startDate }} 至 {{ item.endDate }}')
     expect(planTemplate).toContain('item.weeklyMinutes')
+    expect(planTemplate).toContain('item.dailyAvailability.length')
+    expect(planTemplate).toContain('未来 7 天可投入时间')
+    expect(planTemplate).toContain('durationLabel(day.availableMinutes)')
     expect(planTemplate).toContain("item.status === 'READY'")
   })
 })

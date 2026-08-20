@@ -17,8 +17,8 @@ Agent 服务（LangGraph）
   |
 ---------------------------
 |            |             |
-PostgreSQL       Qdrant
-业务/作业/记忆   知识向量
+业务 PostgreSQL   LangGraph PostgreSQL   Qdrant
+业务/作业/控制面  Checkpointer/Store     知识向量
 ```
 
 文件存储：对象存储（OSS/S3）。
@@ -133,3 +133,15 @@ PostgreSQL       Qdrant
 - 本地部署大模型
 - 私有化交付
 - 大规模推理
+
+## 七、记忆存储选型结论
+
+采用 LangGraph 原生三层混合方案，而不是 Redis、全部塞入 Store 或另建 Qdrant memory collection：
+
+- Checkpointer 原生表达 thread-scoped Agent State、节点恢复和故障恢复；`thread_id` 绑定 conversation segment，默认保留 7 天。
+- AsyncPostgresStore 原生提供 namespace/key、TTL 和可选 pgvector 语义检索；当前显式配置 1024 维 embedding、`statement` 字段和 cosine 距离，未配置 index 的普通 `asearch` 不视为语义检索。
+- 业务 PostgreSQL 提供消息分页、workflow、乐观版本、权限、retention、control record、tombstone 和审计，是可见性权威源。Checkpoint 或 Store 都不能承担权限判断。
+- Redis 会新增恢复、持久化、双写一致性和运维依赖，却不能替代业务数据库或跨 thread 语义 Store；当前吞吐与 SLO 没有证明其必要性。
+- Qdrant 继续只保存知识文档向量，避免用户记忆治理与知识检索生命周期混合。
+
+Store 与业务数据库不是同一事务边界，因此写入采用 PENDING→Store→ACTIVE CAS，遗忘采用先业务屏障、后物理删除。Scheduler 执行 TTL sweep、超时 PENDING、已删除/过期正文和孤儿补偿；API/Worker 不运行常驻 TTL sweeper。

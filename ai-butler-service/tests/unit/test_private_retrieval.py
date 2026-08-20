@@ -6,7 +6,7 @@ from uuid import UUID
 
 import pytest
 
-from ai_butler.application.butler.private_retrieval import PrivateEvidenceRetriever
+from ai_butler.application.butler.worker.retrieval import PrivateEvidenceRetriever
 
 USER_ID = UUID("00000000-0000-0000-0000-000000000201")
 

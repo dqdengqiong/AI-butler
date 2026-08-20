@@ -2,6 +2,6 @@
 
 from __future__ import annotations
 
-CURRENT_GRAPH_VERSION = "butler-graph-v1"
-CURRENT_PROMPT_BUNDLE_VERSION = "butler-prompts-v1"
+CURRENT_GRAPH_VERSION = "butler-graph-v2"
+CURRENT_PROMPT_BUNDLE_VERSION = "butler-prompts-v2"
 TOOL_REGISTRY_VERSION = "2.0"

@@ -45,6 +45,10 @@ ai-butler-backend/
 - `api` 负责 HTTP/SSE 协议转换、鉴权依赖和输入输出校验，不承载业务规则。
 - `workers` 负责后台进程入口、作业领取、lease、heartbeat 和调度循环。
 - `application` 统一编排业务用例、Repository 操作和事务，是 API 与 Worker 复用的应用层。
+- `application/butler/memory` 封装长期记忆策略、Store、一致性协议和治理作业。
+- `application/butler/scheduler` 封装 Scheduler 轮询、通用后台作业和滚动排期。
+- `application/butler/worker` 封装 Agent Run 领取、LangGraph、上下文、执行与完成处理；
+  顶层 `workers` 只保留进程启动和通用轮询运行时。
 - `domain` 与 `agent` 保存领域规则、状态契约和安全策略，不依赖 FastAPI 路由。
 - `adapters` 和 `infrastructure` 封装数据库、微信、SearchProvider、模型、Qdrant、通知及对象存储等外部能力。
 

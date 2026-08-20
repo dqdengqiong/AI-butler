@@ -54,6 +54,11 @@ def test_qwen_only_routes_and_embedding_load() -> None:
     assert routing.routes["executor"].timeout_ms == 45_000
     assert routing.routes["executor"].max_output_tokens == 4096
     assert routing.routes["executor"].thinking.value == "disabled"
+    assert routing.routes["intent_router"].max_input_tokens == 4_000
+    assert routing.routes["memory_extractor"].max_input_tokens == 4_000
+    assert routing.routes["response"].max_input_tokens == 8_000
+    assert routing.routes["planner"].max_input_tokens == 10_000
+    assert routing.routes["research"].max_input_tokens == 12_000
     assert routing.embedding.model == "text-embedding-v4"
     assert routing.embedding.dimensions == 1024
 

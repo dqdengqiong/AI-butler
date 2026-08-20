@@ -1,3 +1,5 @@
+"""Agent Worker 的运行领取与执行入口。"""
+
 from __future__ import annotations
 
 import logging
@@ -7,14 +9,14 @@ from sqlalchemy import text
 
 from ai_butler.domain.errors import ButlerError
 
+from ..bootstrap import BootstrapService
+from ..context import ButlerContext
+from ..events import EventService
+from ..shared import _row
 from .completion import CompletionService
-from .context import ButlerContext
-from .events import EventService
+from .evidence import EvidenceExecutionService
 from .executor import RunExecutor
 from .graph import ButlerGraphRuntime
-from .shared import (
-    _row,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -24,14 +26,19 @@ class WorkerService:
         self,
         context: ButlerContext,
         events: EventService,
-        executor: RunExecutor,
-        completion: CompletionService,
+        bootstrap: BootstrapService,
     ) -> None:
+        completion = CompletionService(context, events)
+        evidence = EvidenceExecutionService(context, events, completion, bootstrap)
+        executor = RunExecutor(context, events, evidence, completion)
         self.database = context.database
         self.settings = context.settings
         self._append_event = events._append_event
         self._graph = ButlerGraphRuntime(context, executor)
-        self._fail_run = completion._fail_run
+        self._fail_run_handler = completion._fail_run
+
+    async def fail_run(self, run_id: UUID, error: ButlerError) -> None:
+        await self._fail_run_handler(run_id, error)
 
     async def worker_poll_once(self, worker_id: UUID) -> bool:
         """领取并执行一个 run；网络/模型实现接入时应在领取事务提交后调用。"""
@@ -75,10 +82,10 @@ class WorkerService:
         try:
             await self._graph.run(UUID(str(run["id"])))
         except ButlerError as exc:
-            await self._fail_run(UUID(str(run["id"])), exc)
+            await self._fail_run_handler(UUID(str(run["id"])), exc)
         except Exception:
             logger.exception("agent run failed", extra={"run_id": str(run["id"])})
-            await self._fail_run(
+            await self._fail_run_handler(
                 UUID(str(run["id"])),
                 ButlerError("AGENT_INTERNAL_ERROR", "管家暂时无法完成处理", 500, True),
             )

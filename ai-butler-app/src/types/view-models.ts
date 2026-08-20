@@ -1,3 +1,5 @@
+import type { DailyAvailabilityResponse } from '@/api/butler'
+
 export type MainTab = 'home' | 'plans' | 'chat' | 'mine'
 
 export type SheetName =
@@ -84,6 +86,13 @@ export interface SourceSummaryViewModel {
   publishedAt: string | null
 }
 
+export interface DailyAvailabilityViewModel {
+  date: string
+  dayOfWeek: number
+  availableMinutes: number
+  source: DailyAvailabilityResponse['source']
+}
+
 export type ChatItem =
   | {
       key: string
@@ -108,6 +117,7 @@ export type ChatItem =
       targetPlanId?: string
       previewHash: string
       warnings: string[]
+      dailyAvailability: DailyAvailabilityViewModel[]
       status: 'READY' | 'CONFIRMED' | 'SUPERSEDED' | 'DISMISSED' | 'EXPIRED'
       confirming?: boolean
     }

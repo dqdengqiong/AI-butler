@@ -4,8 +4,10 @@ import re
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
+from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from sqlalchemy import text
 
+from ai_butler.agent.evidence import estimate_tokens
 from ai_butler.agent.versions import (
     CURRENT_GRAPH_VERSION,
     CURRENT_PROMPT_BUNDLE_VERSION,
@@ -35,6 +37,8 @@ class MessageService:
         responses: ResponseFactory,
     ) -> None:
         self.database = context.database
+        self.settings = context.settings
+        self._langgraph_database_url = context.settings.langgraph_database_url
         self._preflight_conversation_route = routing._preflight_conversation_route
         self._resolve_message_conversation = routing._resolve_message_conversation
         self._reserve_execution_slot = repository._reserve_execution_slot
@@ -50,6 +54,14 @@ class MessageService:
     ) -> dict[str, object]:
         """每次发送都创建新 run；不存在选择提交或旧 run 恢复。"""
 
+        if request.content.strip() in {"清空当前上下文", "清除当前上下文"}:
+            request = request.model_copy(update={"context_policy": "ARCHIVE_AND_START"})
+        if estimate_tokens(request.content.strip()) > self.settings.message_input_max_tokens:
+            raise ButlerError(
+                "MESSAGE_TOO_LONG",
+                f"单条消息最多约 {self.settings.message_input_max_tokens} Token，请改用附件",
+                422,
+            )
         preflight_route = await self._preflight_conversation_route(user_id, request)
         now = datetime.now(UTC)
         request_hash = _message_request_hash(request)
@@ -134,10 +146,17 @@ class MessageService:
             )
             await connection.execute(
                 text(
-                    "INSERT INTO memory_extraction_jobs(id,user_id,message_id,status) "
-                    "VALUES(:id,:user_id,:message_id,'PENDING') ON CONFLICT(message_id) DO NOTHING"
+                    "INSERT INTO memory_extraction_jobs(id,user_id,message_id,source_conversation_id,"
+                    "policy_generation,status) SELECT :id,:user_id,:message_id,:conversation_id,"
+                    "COALESCE((SELECT policy_generation FROM memory_policy_state "
+                    "WHERE user_id=:user_id),1),'PENDING' ON CONFLICT(message_id) DO NOTHING"
                 ),
-                {"id": uuid4(), "user_id": user_id, "message_id": user_message_id},
+                {
+                    "id": uuid4(),
+                    "user_id": user_id,
+                    "message_id": user_message_id,
+                    "conversation_id": conversation["id"],
+                },
             )
             await connection.execute(
                 text(
@@ -255,4 +274,46 @@ class MessageService:
         response["transition"] = transition
         response["run"]["execution_mode"] = "START"  # type: ignore[index]
         response["stream"]["last_sequence"] = sequence  # type: ignore[index]
+        if request.context_policy == "ARCHIVE_AND_START" and transition.get(
+            "archived_conversation_id"
+        ):
+            await self._delete_conversation_checkpoints(
+                UUID(str(transition["archived_conversation_id"]))
+            )
         return response
+
+    async def _delete_conversation_checkpoints(self, conversation_id: UUID) -> None:
+        async with self.database.transaction() as connection:
+            thread_ids = tuple(
+                str(value)
+                for value in (
+                    await connection.execute(
+                        text(
+                            "SELECT thread_id FROM conversation_segments "
+                            "WHERE conversation_id=:conversation_id"
+                        ),
+                        {"conversation_id": conversation_id},
+                    )
+                ).scalars()
+            )
+            await connection.execute(
+                text(
+                    "UPDATE conversation_segments SET checkpoint_delete_requested_at=now() "
+                    "WHERE conversation_id=:conversation_id"
+                ),
+                {"conversation_id": conversation_id},
+            )
+        try:
+            async with AsyncPostgresSaver.from_conn_string(self._langgraph_database_url) as saver:
+                for thread_id in thread_ids:
+                    await saver.adelete_thread(thread_id)
+        except Exception:
+            return
+        async with self.database.transaction() as connection:
+            await connection.execute(
+                text(
+                    "UPDATE conversation_segments SET checkpoint_deleted_at=now() "
+                    "WHERE conversation_id=:conversation_id"
+                ),
+                {"conversation_id": conversation_id},
+            )

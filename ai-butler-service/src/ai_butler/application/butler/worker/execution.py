@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from typing import Any, cast
+from typing import Any, Literal, cast
 from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import text
 
 from ai_butler.adapters.search import SearchError, SearchUnavailableError
+from ai_butler.agent.availability import expand_availability_calendar
 from ai_butler.agent.contracts import IntentDecisionV1, PlanScopeV1
 from ai_butler.api.schemas import PlanPreviewCardPayloadV1
 from ai_butler.domain.errors import ButlerError
@@ -24,11 +25,12 @@ from ai_butler.tools import (
     search_public_knowledge,
 )
 
-from .run_context import RunContext, build_run_context
-from .shared import _content_hash, _json, _row
+from ..shared import _content_hash, _json, _row
+from .context import RunContext, build_run_context
+from .workflow import WorkflowSessionMixin
 
 
-class RunExecutionService:
+class RunExecutionService(WorkflowSessionMixin):
     """模型只分类和生成内容；代码决定能力、读取范围与业务写权限。"""
 
     def __init__(self, owner: Any) -> None:
@@ -38,7 +40,7 @@ class RunExecutionService:
         return getattr(self._owner, name)
 
     async def route(self, run_id: UUID) -> IntentDecisionV1:
-        context = await self._build_context(run_id, include_memories=False)
+        context = await self._build_context(run_id, include_memories=False, task="ROUTER")
         await self._emit_progress(context.run, "UNDERSTANDING_INTENT")
         decision = cast(
             IntentDecisionV1,
@@ -68,7 +70,7 @@ class RunExecutionService:
         return decision
 
     async def respond(self, run_id: UUID, decision: IntentDecisionV1) -> None:
-        context = await self._build_context(run_id)
+        context = await self._build_context(run_id, task="GENERAL")
         if decision.intent == "CLARIFY":
             await self._complete_text(
                 run_id, decision.clarifying_question or "请具体说明你希望我协助什么。"
@@ -94,7 +96,14 @@ class RunExecutionService:
         )
 
     async def execute(self, run_id: UUID, decision: IntentDecisionV1) -> None:
-        context = await self._build_context(run_id)
+        task: Literal["GENERAL", "PLANNING", "RESEARCH"] = (
+            "PLANNING"
+            if decision.intent in {"PLAN_CREATE", "PLAN_ADJUST", "DAILY_PLANNING", "PLAN_REVIEW"}
+            else "RESEARCH"
+            if decision.intent in {"RESEARCH", "CIVIL_QA"}
+            else "GENERAL"
+        )
+        context = await self._build_context(run_id, task=task)
         tool_plan = DEFAULT_TOOL_REGISTRY.resolve(decision.intent, decision.context_needs)
         if decision.intent in {"PLAN_CREATE", "PLAN_ADJUST"}:
             await self._collect_and_prepare_plan(run_id, context, decision.intent)
@@ -135,15 +144,19 @@ class RunExecutionService:
                 ).scalar_one()
             )
         today = datetime.now(ZoneInfo(timezone_name)).date()
+        workflow = await self._active_plan_workflow(context)
         result = await self._plan_requirements.collect(
             current_input=context.user_input,
             recent_messages=context.recent_messages,
             start_date=today,
             run_id=run_id,
+            existing_slots=(workflow.get("slots") if workflow is not None else None),
         )
         if result.status == "NEEDS_CLARIFICATION":
+            await self._save_plan_workflow(context, workflow, result.data or {})
             await self._complete_text(run_id, result.clarification or "请补充计划信息。")
             return
+        await self._complete_plan_workflow(workflow)
         requirements = cast(PlanRequirementsV1, result.data)
         baseline = await self._resolve_adjustment_baseline(context, intent)
         if intent == "PLAN_ADJUST" and baseline is None:
@@ -284,13 +297,21 @@ class RunExecutionService:
         )
         await self._emit_progress(context.run, "SCHEDULING_TASKS")
         DEFAULT_TOOL_REGISTRY.require("schedule_plan_window", "ToolExecutor", intent)
+        preview_window_end = min(
+            requirements.target_date, requirements.start_date + timedelta(days=6)
+        )
+        daily_availability = expand_availability_calendar(
+            availability,
+            start_date=requirements.start_date,
+            end_date=preview_window_end,
+        )
         scheduled, unscheduled = schedule_plan_window(
             revision_ref=str(run_id),
             templates=templates,
             stages=stages,
             availability=availability.model_dump(mode="json"),
             window_start=requirements.start_date,
-            window_end=min(requirements.target_date, requirements.start_date + timedelta(days=6)),
+            window_end=preview_window_end,
         )
         plan_data = planner.plan.model_dump(mode="json")
         plan_data["tasks"] = [task.model_dump(mode="json") for task in scheduled]
@@ -324,6 +345,7 @@ class RunExecutionService:
             ),
             "evidence": evidence_data,
             "availability": availability.model_dump(mode="json"),
+            "daily_availability": [item.model_dump(mode="json") for item in daily_availability],
             "scenario_code": requirements.scenario_code,
             "scenario_fields": requirements.scenario_fields,
             "warnings": list(planner.warnings)
@@ -458,5 +480,13 @@ class RunExecutionService:
             complete = self._complete_validated_run if validated else self._complete_run
             await complete(connection, run, content, cards=cards)
 
-    async def _build_context(self, run_id: UUID, *, include_memories: bool = True) -> RunContext:
-        return await build_run_context(self._owner, run_id, include_memories=include_memories)
+    async def _build_context(
+        self,
+        run_id: UUID,
+        *,
+        include_memories: bool = True,
+        task: Literal["ROUTER", "GENERAL", "PLANNING", "RESEARCH"] = "GENERAL",
+    ) -> RunContext:
+        return await build_run_context(
+            self._owner, run_id, include_memories=include_memories, task=task
+        )

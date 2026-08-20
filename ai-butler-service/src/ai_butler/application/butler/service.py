@@ -36,13 +36,10 @@ from ai_butler.infrastructure.database import AsyncDatabase
 
 from .auth import AuthService
 from .bootstrap import BootstrapService
-from .completion import CompletionService
 from .context import ButlerContext
 from .conversation_queries import ConversationQueryService
 from .conversation_repository import ConversationRepository
 from .events import EventService
-from .evidence_execution import EvidenceExecutionService
-from .executor import RunExecutor
 from .files import FileService
 from .messages import MessageService
 from .plan_previews import PlanPreviewService
@@ -109,22 +106,12 @@ class ButlerService:
         self._auth = AuthService(self._context, self._bootstrap, self._responses)
         self._queries = ConversationQueryService(self._context)
         self._planning = PlanningService(self._context, self._users)
-        self._completion = CompletionService(self._context, self._events)
-        self._evidence = EvidenceExecutionService(
-            self._context, self._events, self._completion, self._bootstrap
-        )
         self._runs = RunService(self._context, self._events, self._repository)
         self._messages = MessageService(
             self._context, self._routing, self._repository, self._events, self._responses
         )
-        self._executor = RunExecutor(
-            self._context,
-            self._events,
-            self._evidence,
-            self._completion,
-        )
         self._plan_previews = PlanPreviewService(self._context)
-        self._worker = WorkerService(self._context, self._events, self._executor, self._completion)
+        self._worker = WorkerService(self._context, self._events, self._bootstrap)
         self._scheduler = SchedulerService(self._context)
         self._files = FileService(self._context)
 
@@ -318,7 +305,7 @@ class ButlerService:
         return await self._scheduler.scheduler_poll_once()
 
     async def _fail_run(self, run_id: UUID, error: ButlerError) -> None:
-        return await self._completion._fail_run(run_id, error)
+        return await self._worker.fail_run(run_id, error)
 
     _conversation_response = staticmethod(ConversationQueryService._conversation_response)
     _specialist_response = staticmethod(ConversationQueryService._specialist_response)

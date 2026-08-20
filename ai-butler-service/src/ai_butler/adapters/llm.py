@@ -214,7 +214,7 @@ class FakeLLM:
             raise ModelServerError("fake model server error")
         if request.scenario is FakeScenario.INVALID_JSON:
             content = "not-json"
-        elif request.prompt_version.startswith("availability-v1"):
+        elif request.prompt_version.startswith(("availability-v1", "availability-v2")):
             content = fake_availability_response(request.user_input)
         elif request.prompt_version.startswith("research-answer-v1"):
             content = fake_research_response(request.user_input)

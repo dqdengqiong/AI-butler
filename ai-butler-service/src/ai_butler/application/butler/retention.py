@@ -15,6 +15,14 @@ class RetentionService:
     async def cleanup_once(self) -> bool:
         async with self.database.transaction() as connection:
             deleted = 0
+            expired_workflows = await connection.execute(
+                text(
+                    "UPDATE workflow_sessions SET status='EXPIRED',completed_at=now(),updated_at=now(),"
+                    "slots='{}'::jsonb WHERE status='WAITING_INPUT' AND "
+                    "COALESCE(expires_at,updated_at+interval '7 days')<=now()"
+                )
+            )
+            deleted += int(expired_workflows.rowcount or 0)
             for statement, days in (
                 (
                     "DELETE FROM agent_run_events e USING agent_runs r WHERE e.agent_run_id=r.id "
@@ -37,6 +45,11 @@ class RetentionService:
                     "DELETE FROM memory_audit_records WHERE "
                     "created_at<now()-(:days || ' days')::interval",
                     self.settings.memory_audit_retention_days,
+                ),
+                (
+                    "DELETE FROM conversations WHERE deleted_at IS NOT NULL "
+                    "AND deleted_at<now()-(:days || ' days')::interval",
+                    self.settings.deleted_conversation_retention_days,
                 ),
             ):
                 result = await connection.execute(text(statement), {"days": days})

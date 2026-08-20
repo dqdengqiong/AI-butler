@@ -29,11 +29,17 @@ class FakeEmbeddingProvider:
     """Deterministic local embedding for tests; never used as a production model."""
 
     model = "fake-embedding-v1"
-    dimensions = 8
+    dimensions = 1024
 
     async def embed(self, text: str) -> list[float]:
-        digest = hashlib.sha256(text.encode("utf-8")).digest()
-        return [round((digest[index] / 127.5) - 1.0, 6) for index in range(self.dimensions)]
+        seed = text.encode("utf-8")
+        values: list[float] = []
+        block = 0
+        while len(values) < self.dimensions:
+            digest = hashlib.sha256(seed + block.to_bytes(4, "big")).digest()
+            values.extend(round((value / 127.5) - 1.0, 6) for value in digest)
+            block += 1
+        return values[: self.dimensions]
 
     async def embed_many(self, texts: tuple[str, ...]) -> tuple[list[float], ...]:
         embeddings: list[list[float]] = []

@@ -4,6 +4,7 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
+from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
@@ -21,6 +22,7 @@ from .shared import (
 class ConversationQueryService:
     def __init__(self, context: ButlerContext) -> None:
         self.database = context.database
+        self._langgraph_database_url = context.settings.langgraph_database_url
 
     async def list_conversations(
         self, user_id: UUID, limit: int = 30, cursor: str | None = None
@@ -107,6 +109,7 @@ class ConversationQueryService:
         避免客户端失去唯一可继续的会话。
         """
 
+        thread_ids: tuple[str, ...] = ()
         async with self.database.transaction() as connection:
             conversation = _row(
                 await connection.execute(
@@ -130,6 +133,69 @@ class ConversationQueryService:
                 text(
                     "UPDATE conversations SET deleted_at=now(),updated_at=now() "
                     "WHERE id=:conversation_id"
+                ),
+                {"conversation_id": conversation_id},
+            )
+            await connection.execute(
+                text(
+                    "UPDATE workflow_sessions SET status='CANCELLED',completed_at=now(),updated_at=now() "
+                    "WHERE conversation_id=:conversation_id "
+                    "AND status IN ('ACTIVE','WAITING_INPUT')"
+                ),
+                {"conversation_id": conversation_id},
+            )
+            await connection.execute(
+                text(
+                    "UPDATE memory_control_records SET status='DELETED',updated_at=now() "
+                    "WHERE source_conversation_id=:conversation_id AND source_type='AUTOMATIC' "
+                    "AND status IN ('PENDING','ACTIVE','CONFLICTED')"
+                ),
+                {"conversation_id": conversation_id},
+            )
+            await connection.execute(
+                text(
+                    "UPDATE memory_policy_state SET policy_generation=policy_generation+1,"
+                    "profile_snapshot_status='STALE',updated_at=now() WHERE user_id=:user_id"
+                ),
+                {"user_id": user_id},
+            )
+            await connection.execute(
+                text(
+                    "UPDATE user_profile_snapshots SET status='STALE',updated_at=now() "
+                    "WHERE user_id=:user_id"
+                ),
+                {"user_id": user_id},
+            )
+            thread_ids = tuple(
+                str(value)
+                for value in (
+                    await connection.execute(
+                        text(
+                            "SELECT thread_id FROM conversation_segments "
+                            "WHERE conversation_id=:conversation_id"
+                        ),
+                        {"conversation_id": conversation_id},
+                    )
+                ).scalars()
+            )
+            await connection.execute(
+                text(
+                    "UPDATE conversation_segments SET checkpoint_delete_requested_at=now() "
+                    "WHERE conversation_id=:conversation_id"
+                ),
+                {"conversation_id": conversation_id},
+            )
+        try:
+            async with AsyncPostgresSaver.from_conn_string(self._langgraph_database_url) as saver:
+                for thread_id in thread_ids:
+                    await saver.adelete_thread(thread_id)
+        except Exception:
+            return
+        async with self.database.transaction() as connection:
+            await connection.execute(
+                text(
+                    "UPDATE conversation_segments SET checkpoint_deleted_at=now() "
+                    "WHERE conversation_id=:conversation_id"
                 ),
                 {"conversation_id": conversation_id},
             )

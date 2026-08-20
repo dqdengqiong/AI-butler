@@ -123,8 +123,8 @@ async def test_general_response_stream_and_research_are_model_driven(tmp_path: P
                     )
                 ).scalars()
             )
-        assert tuple(versions) == ("butler-graph-v1", "butler-prompts-v1")
-        assert {"Initialize", "Router", "Response"} <= nodes
+        assert tuple(versions) == ("butler-graph-v2", "butler-prompts-v2")
+        assert {"Initialize", "Router", "GeneralResponse"} <= nodes
 
         researched = await client.post(
             "/v1/messages",

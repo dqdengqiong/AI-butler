@@ -6,15 +6,20 @@ import psycopg
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.store.postgres.aio import AsyncPostgresStore
 
+from ai_butler.application.butler.memory.store import STORE_TTL_CONFIG, store_index_config
+from ai_butler.application.butler.support import build_embedding_provider
 from ai_butler.config import get_settings
 
 
 async def setup_internal_tables(database_url: str) -> None:
+    settings = get_settings()
+    embedding_provider = build_embedding_provider(settings)
     async with AsyncPostgresSaver.from_conn_string(database_url) as checkpointer:
         await checkpointer.setup()
     async with AsyncPostgresStore.from_conn_string(
         database_url,
-        ttl={"refresh_on_read": False, "sweep_interval_minutes": 60},
+        index=store_index_config(embedding_provider),
+        ttl=STORE_TTL_CONFIG,
     ) as store:
         await store.setup()
 

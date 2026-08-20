@@ -962,6 +962,26 @@ export interface components {
              */
             kind: "CONTINUED" | "CREATED" | "RESUMED";
         };
+        /**
+         * DailyAvailabilityV1
+         * @description 一个本地日历日的可投入分钟数及其确定性来源。
+         */
+        DailyAvailabilityV1: {
+            /** Available Minutes */
+            available_minutes: number;
+            /**
+             * Date
+             * Format: date
+             */
+            date: string;
+            /** Day Of Week */
+            day_of_week: number;
+            /**
+             * Source
+             * @enum {string}
+             */
+            source: "EXPLICIT_RULE" | "WEEKLY_EVEN_SPLIT" | "EXCLUDED_WEEKDAY" | "EXCLUDED_DATE" | "NO_RULE";
+        };
         /** DeleteAccountRequest */
         DeleteAccountRequest: {
             /**
@@ -1128,6 +1148,8 @@ export interface components {
             };
             /** Available Weekly Minutes */
             available_weekly_minutes: number;
+            /** Daily Availability */
+            daily_availability?: components["schemas"]["DailyAvailabilityV1"][];
             /** Evidence */
             evidence?: {
                 [key: string]: unknown;

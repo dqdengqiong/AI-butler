@@ -1,0 +1,92 @@
+{
+  "schema_version": "1.0",
+  "prompt_version": "availability-v2",
+  "cases": [
+    {
+      "id": "daily-arabic-hours",
+      "input": "每天学习2小时",
+      "status": "COMPLETE",
+      "weekly_minutes": 840,
+      "days": [1, 2, 3, 4, 5, 6, 7]
+    },
+    {
+      "id": "daily-chinese-hours",
+      "input": "每日两小时",
+      "status": "COMPLETE",
+      "weekly_minutes": 840,
+      "days": [1, 2, 3, 4, 5, 6, 7]
+    },
+    {
+      "id": "daily-half-hour",
+      "input": "每天半小时",
+      "status": "COMPLETE",
+      "weekly_minutes": 210,
+      "days": [1, 2, 3, 4, 5, 6, 7]
+    },
+    {
+      "id": "workday-alias",
+      "input": "平日每天1小时",
+      "status": "COMPLETE",
+      "weekly_minutes": 300,
+      "days": [1, 2, 3, 4, 5]
+    },
+    {
+      "id": "weekday-list",
+      "input": "周一周三周五各45分钟",
+      "status": "COMPLETE",
+      "weekly_minutes": 135,
+      "days": [1, 3, 5]
+    },
+    {
+      "id": "workday-and-weekend",
+      "input": "工作日每天1小时，周末每天2小时",
+      "status": "COMPLETE",
+      "weekly_minutes": 540,
+      "days": [1, 2, 3, 4, 5, 6, 7]
+    },
+    {
+      "id": "daily-time-with-exclusion",
+      "input": "每天晚上7点到9点，周三休息",
+      "status": "COMPLETE",
+      "weekly_minutes": 720,
+      "days": [1, 2, 4, 5, 6, 7]
+    },
+    {
+      "id": "daily-with-explicit-date-exception",
+      "input": "每天1小时，2026年8月25日休息",
+      "status": "COMPLETE",
+      "weekly_minutes": 420,
+      "days": [1, 2, 3, 4, 5, 6, 7]
+    },
+    {
+      "id": "weekly-flexible-total",
+      "input": "每周6小时",
+      "status": "COMPLETE",
+      "weekly_minutes": 360,
+      "days": []
+    },
+    {
+      "id": "daily-missing-duration",
+      "input": "每天",
+      "status": "NEEDS_CLARIFICATION",
+      "weekly_minutes": null,
+      "days": [],
+      "question_contains": "每天可以学习多少小时或分钟"
+    },
+    {
+      "id": "ambiguous-duration-range",
+      "input": "每天1到2小时",
+      "status": "NEEDS_CLARIFICATION",
+      "weekly_minutes": null,
+      "days": [],
+      "question_contains": "明确要按多少分钟"
+    },
+    {
+      "id": "explicit-correction",
+      "input": "每天1小时\n改成每天2小时",
+      "status": "COMPLETE",
+      "weekly_minutes": 840,
+      "days": [1, 2, 3, 4, 5, 6, 7]
+    }
+  ]
+}

@@ -22,7 +22,7 @@ from ai_butler.application.butler import (
     _encode_cursor,
     _message_request_hash,
 )
-from ai_butler.application.butler.completion import CompletionService
+from ai_butler.application.butler.worker.completion import CompletionService
 from ai_butler.config import Settings
 from ai_butler.domain.errors import ButlerError
 
@@ -189,13 +189,22 @@ async def test_context_budget_archives_a_full_segment_deterministically() -> Non
 
     service = object.__new__(CompletionService)
     service.settings = SimpleNamespace(
+        segment_summary_trigger_tokens=200,
+        segment_rotation_tokens=400,
         context_window_tokens=1000,
         context_soft_limit_ratio=0.2,
         context_hard_limit_ratio=0.4,
     )
     connection = AsyncMock()
     contents_result = MagicMock()
-    contents_result.scalars.return_value.all.return_value = ["学习记录" * 1000]
+    first_message_id = uuid4()
+    last_message_id = uuid4()
+    contents_result.mappings.return_value.all.return_value = [
+        {"id": first_message_id, "role": "USER", "content": "学习记录" * 1000},
+        {"id": last_message_id, "role": "ASSISTANT", "content": "已整理学习计划。"},
+    ]
+    sequence_result = MagicMock()
+    sequence_result.scalar_one.return_value = 2
     conversation_result = MagicMock()
     conversation_id = uuid4()
     segment_id = uuid4()
@@ -203,12 +212,14 @@ async def test_context_budget_archives_a_full_segment_deterministically() -> Non
         "id": conversation_id,
         "active_segment_id": segment_id,
         "context_version": 2,
+        "latest_handoff_summary_id": None,
     }
     summary_id = uuid4()
     summary_result = MagicMock()
     summary_result.scalar_one.return_value = summary_id
     connection.execute.side_effect = [
         contents_result,
+        sequence_result,
         MagicMock(),
         MagicMock(),
         conversation_result,
@@ -232,7 +243,7 @@ async def test_context_budget_archives_a_full_segment_deterministically() -> Non
         },
     )
 
-    assert connection.execute.await_count == 11
+    assert connection.execute.await_count == 12
     statements = [str(call.args[0]) for call in connection.execute.await_args_list]
     assert any("CUMULATIVE_HANDOFF" in statement for statement in statements)
     assert any("status='ARCHIVED'" in statement for statement in statements)
